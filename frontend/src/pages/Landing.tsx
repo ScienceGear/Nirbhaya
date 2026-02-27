@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { MapPin, Phone, Brain, Users, ArrowRight, Sparkles } from "lucide-react";
+import { MapPin, Phone, Brain, Users, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const features = [
@@ -42,11 +42,6 @@ export default function LandingPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
           >
-            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card/80 px-4 py-1.5 text-sm text-primary backdrop-blur">
-              <Sparkles className="h-4 w-4" />
-              Trusted digital safety companion
-            </div>
-
             <div className="mb-5 flex items-center gap-3">
               <img src="/nirbhaya.png" alt="Nirbhaya logo" className="h-12 w-12 rounded-xl object-cover shadow-soft" />
               <div>
@@ -56,7 +51,7 @@ export default function LandingPage() {
             </div>
 
             <h1 className="font-display text-4xl font-bold leading-tight sm:text-5xl lg:text-6xl">
-              Move with confidence, <span className="text-gradient">everyday.</span>
+              Your safety, <span className="text-gradient">our priority.</span>
             </h1>
             <p className="mt-5 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg">
               Nirbhaya helps women navigate safer routes, report incidents, and get emergency help faster with a modern and reliable safety-first experience.

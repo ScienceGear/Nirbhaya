@@ -1,21 +1,48 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Shield, Phone, MapPin, Navigation, Search, Ambulance, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { policeStations } from "@/lib/mockData";
+import { policeStations, type PoliceStation } from "@/lib/mockData";
 import { useI18n } from "@/lib/i18n";
 import DashboardNav from "@/components/DashboardNav";
+
+/* haversine — returns distance in km */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export default function PolicePage() {
   const { t } = useI18n();
   const [search, setSearch] = useState("");
-  const stations = policeStations;
+  const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
 
-  const filtered = stations.filter((s) =>
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => {},
+        { enableHighAccuracy: true, timeout: 8000 },
+      );
+    }
+  }, []);
+
+  /* Enrich stations with live distance & sort by proximity */
+  const enriched: (PoliceStation & { distKm?: number })[] = policeStations.map((ps) => ({
+    ...ps,
+    distKm: userLoc ? haversineKm(userLoc.lat, userLoc.lng, ps.lat, ps.lng) : undefined,
+  }));
+  if (userLoc) enriched.sort((a, b) => (a.distKm ?? 999) - (b.distKm ?? 999));
+
+  const filtered = enriched.filter((s) =>
     s.name.toLowerCase().includes(search.toLowerCase()) ||
     s.address.toLowerCase().includes(search.toLowerCase()) ||
-    s.jurisdiction?.toLowerCase().includes(search.toLowerCase())
+    (s.jurisdiction ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   const quickDial = [
@@ -80,9 +107,9 @@ export default function PolicePage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-start justify-between gap-2">
                     <h3 className="font-semibold text-sm leading-tight">{ps.name}</h3>
-                    {ps.distance && (
+                    {ps.distKm != null && (
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0">
-                        {ps.distance}
+                        {ps.distKm < 1 ? `${Math.round(ps.distKm * 1000)} m` : `${ps.distKm.toFixed(1)} km`}
                       </span>
                     )}
                   </div>
@@ -103,8 +130,10 @@ export default function PolicePage() {
                     <Phone className="h-3.5 w-3.5 mr-1" /> Call
                   </a>
                 </Button>
-                <Button variant="outline" size="sm" className="rounded-xl flex-1 h-8 text-xs">
-                  <Navigation className="h-3.5 w-3.5 mr-1" /> Directions
+                <Button variant="outline" size="sm" className="rounded-xl flex-1 h-8 text-xs" asChild>
+                  <a href={`https://www.google.com/maps/dir/?api=1&destination=${ps.lat},${ps.lng}`} target="_blank" rel="noreferrer">
+                    <Navigation className="h-3.5 w-3.5 mr-1" /> Directions
+                  </a>
                 </Button>
               </div>
             </motion.div>

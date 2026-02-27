@@ -41,7 +41,17 @@ const makeIcon = (color: string) =>
     iconSize: [18, 18],
     iconAnchor: [9, 9],
   });
-const policeIconNew = makeIcon("#3b82f6");
+const policeIconNew = L.divIcon({
+  className: "",
+  html: `<div style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:#1d4ed8;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      <path d="M12 8v4"/><path d="M12 16h.01"/>
+    </svg>
+  </div>`,
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+});
 const incidentIconNew = makeIcon("#ef4444");
 const safeIconNew = makeIcon("#22c55e");
 const destIconNew = makeIcon("#f43f5e");
@@ -1290,10 +1300,10 @@ export default function Dashboard() {
     staleTime: 2 * 60 * 1000,
   });
 
-  const mapIncidents = overview?.incidents || incidents;
-  const mapClusters = overview?.clusters || [];
-  const mapHeat = overview?.heatmap || [];
-  const stationData  = overview?.policeStations || policeStations;
+  const mapIncidents = overview?.incidents?.length ? overview.incidents : incidents;
+  const mapClusters = overview?.clusters ?? [];
+  const mapHeat = overview?.heatmap ?? [];
+  const stationData  = overview?.policeStations?.length ? overview.policeStations : policeStations;
   const userArrowIcon = useMemo(() => makeUserArrowIcon(userHeading), [userHeading]);
 
   const mapCenter = useMemo<[number, number]>(() =>
@@ -1593,8 +1603,10 @@ export default function Dashboard() {
             <Marker key={ps.id} position={[ps.lat, ps.lng]} icon={policeIconNew}>
               <Popup>
                 <strong className="block text-sm">{ps.name}</strong>
-                <span className="text-xs text-gray-500">{ps.address}</span><br />
-                <span className="text-xs font-medium">{ps.phone}</span>
+                <span className="text-xs text-gray-500 block mt-0.5">{ps.address}</span>
+                {ps.jurisdiction && <span className="text-[10px] text-blue-600 font-medium block mt-0.5">Area: {ps.jurisdiction}</span>}
+                <a href={`tel:${ps.phone}`} className="text-xs font-medium text-blue-600 mt-0.5 block">{ps.phone}</a>
+                <a href={`https://www.google.com/maps/dir/?api=1&destination=${ps.lat},${ps.lng}`} target="_blank" rel="noreferrer" className="text-[11px] text-blue-500 underline block mt-1">Get Directions →</a>
               </Popup>
             </Marker>
           ))}

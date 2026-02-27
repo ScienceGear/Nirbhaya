@@ -18,17 +18,7 @@ export default function Navbar() {
     { to: "/faq", label: "FAQ" },
   ];
 
-  const appLinks = user
-    ? [
-        { to: "/dashboard", label: "Dashboard" },
-        { to: "/sos", label: "SOS" },
-        { to: "/report", label: "Report" },
-        { to: "/police", label: "Police" },
-        { to: "/settings", label: "Settings" },
-      ]
-    : [];
-
-  const navLinks = [...coreLinks, ...appLinks];
+  const navLinks = coreLinks;
 
   useEffect(() => {
     setOpen(false);
@@ -43,12 +33,12 @@ export default function Navbar() {
         </Link>
 
         {/* Desktop nav */}
-        <div className="hidden md:flex items-center gap-1 overflow-x-auto">
+        <div className="hidden md:flex items-center gap-0.5 overflow-x-auto">
           {navLinks.map((l) => (
             <Link
               key={l.to}
               to={l.to}
-              className={`rounded-full px-3 py-2 text-sm font-medium transition-colors ${
+              className={`rounded-full px-2.5 py-1.5 text-sm font-medium transition-colors ${
                 location.pathname === l.to
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted"
