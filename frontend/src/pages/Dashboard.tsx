@@ -19,6 +19,7 @@ import { useAuth } from "@/lib/auth";
 import SOSButton from "@/components/SOSButton";
 import DashboardNav from "@/components/DashboardNav";
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet";
+import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
 import { getCrowdHeatmap, getMapOverview, updateLocation } from "@/lib/api";
@@ -37,7 +38,7 @@ L.Icon.Default.mergeOptions({
 const makeIcon = (color: string) =>
   L.divIcon({
     className: "",
-    html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>}`,
+    html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>`,
     iconSize: [18, 18],
     iconAnchor: [9, 9],
   });
@@ -248,7 +249,7 @@ function LocationInput({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={{ duration: 0.13 }}
-            className="absolute left-0 right-0 top-full mt-1 z-[900] rounded-xl border border-border bg-card/97 backdrop-blur-xl shadow-elevated overflow-hidden"
+            className="absolute left-0 right-0 top-full mt-1 z-[900] rounded-xl border border-border bg-card/97 backdrop-blur-xl shadow-elevated overflow-y-auto max-h-60"
           >
             {suggestions.map((s, i) => (
               <li key={s.kind === "local" ? s.loc.name : s.placeId + i}>
@@ -554,104 +555,170 @@ async function fetchRealRoutes(
   return collected.slice(0, 3).map((raw, i) => toRoute(raw, i));
 }
 
-/* ── Google Maps Directions API routing (primary, falls back to OSRM) ── */
+/* ── Gemini 2.5 Flash route safety analysis ── */
+const GEMINI_API_KEY = "AIzaSyBobtdTj_dANiuRX1UNjKFFsA295cQNwes";
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+interface AIRouteAnalysis {
+  rsi: number;
+  risk: "safe" | "moderate" | "risky";
+  name: string;
+  reasons: string[];
+}
+
+async function analyzeRoutesWithAI(
+  routes: Array<{
+    distance: string;
+    duration: string;
+    nearbyIncidents: number;
+    highSeverityCount: number;
+    nearestPoliceStation: number;
+  }>,
+  origin: string,
+  destination: string,
+): Promise<AIRouteAnalysis[]> {
+  const prompt = `You are a women's safety routing AI for Pune, India.
+Analyze these ${routes.length} route alternatives from "${origin}" to "${destination}" and return a safety score for each.
+
+Route data:
+${routes.map((r, i) =>
+  `Route ${i + 1}: distance=${r.distance}, duration=${r.duration}, ` +
+  `incidents_within_500m=${r.nearbyIncidents}, high_severity_incidents=${r.highSeverityCount}, ` +
+  `nearest_police_station=${r.nearestPoliceStation.toFixed(2)}km`
+).join("\n")}
+
+Scoring logic:
+- Start each route at RSI 85
+- Subtract 4 per incident within 500m (max -28)
+- Subtract 8 per high-severity incident (max -24)
+- Add 6 if nearest police station < 0.5km, add 3 if < 1km
+- Longer routes that avoid incidents should score HIGHER than short direct ones
+- Final RSI must be between 10 and 97 and must differ between routes by at least 8 points
+- rsi 80-97 = safe, 55-79 = moderate, 10-54 = risky
+
+Return ONLY a valid JSON array, no markdown, no explanation:
+[
+  {"rsi": <number>, "risk": "<safe|moderate|risky>", "name": "<descriptive route name>", "reasons": ["<reason1>", "<reason2>", "<reason3>"]},
+  {"rsi": <number>, "risk": "<safe|moderate|risky>", "name": "<descriptive route name>", "reasons": ["<reason1>", "<reason2>", "<reason3>"]},
+  {"rsi": <number>, "risk": "<safe|moderate|risky>", "name": "<descriptive route name>", "reasons": ["<reason1>", "<reason2>", "<reason3>"]}
+]
+
+Names must be distinct and descriptive (e.g. "Safest via Main Roads", "Balanced Route", "Fastest Direct").
+Reasons must be short, specific, safety-focused (e.g. street lighting, police proximity, incident density).`;
+
+  try {
+    const res = await fetch(GEMINI_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 700 },
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(`Gemini ${res.status}: ${errBody}`);
+    }
+    const data = await res.json();
+    const text: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const match = text.match(/\[[\s\S]*?\]/);
+    if (!match) throw new Error("No JSON array in Gemini response");
+    const parsed: AIRouteAnalysis[] = JSON.parse(match[0]);
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Empty Gemini response");
+    // Ensure exactly 3 entries
+    while (parsed.length < 3) parsed.push(parsed[parsed.length - 1]);
+    return parsed.slice(0, 3);
+  } catch (err) {
+    console.warn("[Gemini] AI analysis failed, using heuristic fallback:", err);
+    return [];
+  }
+}
+
+/* ── Smart safe-route scoring: OSRM geometry + Gemini 2.5 Flash safety analysis ── */
 async function fetchGoogleMapsRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
   incidentData: Array<{ lat: number; lng: number; severity: number }> = [],
 ): Promise<RouteOption[]> {
-  const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
-  const NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
-  const TYPES = ["safest", "moderate", "fastest"] as const;
-  const BASE_RSI = [88, 72, 54];
-  const REASONS = [
-    ["Better-lit segments", "Lower incident density", "More support points nearby"],
-    ["Balanced time and safety", "Mixed main + inner roads", "Moderate streetlighting"],
-    ["Lowest ETA", "Direct road geometry", "Consider higher safety routes"],
+  const COLOR_MAP = { safe: "#22c55e", moderate: "#f59e0b", risky: "#ef4444" };
+  const FALLBACK_COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
+  const FALLBACK_NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
+  const FALLBACK_TYPES = ["safest", "moderate", "fastest"] as const;
+  const FALLBACK_RSI = [88, 72, 54];
+  const FALLBACK_REASONS = [
+    ["Better-lit main roads", "Lower incident density", "More police coverage nearby"],
+    ["Balanced time and safety", "Mixed main + inner roads", "Moderate risk level"],
+    ["Lowest travel time", "Direct road geometry", "Higher risk — use with caution"],
   ];
 
-  const computePenalty = (coords: [number, number][]) => {
-    if (!incidentData.length) return 0;
-    const step = Math.max(1, Math.floor(coords.length / 80));
-    let penalty = 0;
+  /* ── Helper: count incidents near a route ── */
+  const countNearby = (coords: [number, number][], radiusKm: number) => {
+    if (!incidentData.length) return { total: 0, high: 0 };
+    const step = Math.max(1, Math.floor(coords.length / 60));
+    let total = 0, high = 0;
     incidentData.forEach((inc) => {
       let minDist = Infinity;
       for (let i = 0; i < coords.length; i += step) {
         const d = haversineKm(coords[i][1], coords[i][0], inc.lat, inc.lng);
         if (d < minDist) minDist = d;
       }
-      if (minDist <= 1.2) penalty += (inc.severity || 1) * (1.3 - Math.min(minDist, 1));
+      if (minDist <= radiusKm) { total++; if (inc.severity >= 3) high++; }
     });
-    return Math.min(35, Math.round(penalty));
+    return { total, high };
   };
 
-  try {
-    const gwin = window as any;
-    if (!gwin.google?.maps?.DirectionsService) {
-      await importLibrary("routes");
-    }
-    const gmaps = gwin.google.maps;
-    const svc = new gmaps.DirectionsService();
+  const nearestPolice = (coords: [number, number][]) => {
+    if (!policeStations.length || !coords.length) return 999;
+    const mid = coords[Math.floor(coords.length / 2)];
+    return Math.min(...policeStations.map((ps) => haversineKm(mid[1], mid[0], ps.lat, ps.lng)));
+  };
 
-    const result = await new Promise<any>((resolve, reject) => {
-      svc.route(
-        {
-          origin: { lat: s.lat, lng: s.lng },
-          destination: { lat: e.lat, lng: e.lng },
-          travelMode: gmaps.TravelMode.WALKING,
-          provideRouteAlternatives: true,
-          region: "IN",
-        },
-        (response: any, status: string) => {
-          if (status === "OK") resolve(response);
-          else reject(new Error(`Directions: ${status}`));
-        }
-      );
-    });
+  // Step 1 — Get real OSRM road geometry
+  let rawRoutes = await fetchRealRoutes(s, e, incidentData);
 
-    if (!result.routes?.length) throw new Error("No routes returned");
+  // Step 2 — Build stats per route for AI
+  const routeStats = rawRoutes.map((r) => {
+    const { total, high } = countNearby(r.coordinates, 0.5);
+    return {
+      distance: r.distance,
+      duration: r.duration,
+      nearbyIncidents: total,
+      highSeverityCount: high,
+      nearestPoliceStation: nearestPolice(r.coordinates),
+    };
+  });
 
-    const sorted = [...result.routes]
-      .sort((a: any, b: any) => (b.legs[0]?.distance?.value ?? 0) - (a.legs[0]?.distance?.value ?? 0))
-      .slice(0, 3);
+  // Step 3 — Ask AI to analyze and score
+  const originName = `${s.lat.toFixed(4)},${s.lng.toFixed(4)}`;
+  const destName   = `${e.lat.toFixed(4)},${e.lng.toFixed(4)}`;
+  const aiResults  = await analyzeRoutesWithAI(routeStats, originName, destName);
 
-    // Pad to 3 if fewer alternatives returned
-    while (sorted.length < 3) sorted.push(sorted[sorted.length - 1]);
-
-    return sorted.map((gmRoute: any, i: number) => {
-      const leg = gmRoute.legs[0];
-      const path: any[] = gmRoute.overview_path ?? [];
-      const coords: [number, number][] = path.map((p: any) => [p.lng(), p.lat()]);
-      const penalty = computePenalty(coords);
-      const rsi = Math.max(20, BASE_RSI[Math.min(i, 2)] - penalty);
-      const reasons = [...REASONS[Math.min(i, 2)]];
-      if (penalty >= 5) reasons.push("Community reports reduced safety score");
-
-      const steps = (leg.steps ?? []).map((step: any) => ({
-        instruction: step.instructions.replace(/<[^>]+>/g, "").trim(),
-        distance: step.distance?.value ?? 0,
-        duration: step.duration?.value ?? 0,
-        location: [step.start_location.lng(), step.start_location.lat()] as [number, number],
-      })).filter((st: any) => st.distance > 5);
-
+  // Step 4 — Merge AI analysis back into routes
+  return rawRoutes.map((r, i) => {
+    const ai = aiResults[i];
+    if (ai) {
+      const riskType = ai.risk === "safe" ? "safest" : ai.risk === "moderate" ? "moderate" : "fastest";
       return {
+        ...r,
         id: `r${i + 1}`,
-        name: NAMES[Math.min(i, 2)],
-        type: TYPES[Math.min(i, 2)],
-        rsi,
-        duration: `${Math.max(1, Math.round((leg.duration?.value ?? 0) / 60))} min`,
-        distance: `${((leg.distance?.value ?? 0) / 1000).toFixed(1)} km`,
-        color: COLOR[Math.min(i, 2)],
-        reasons,
-        coordinates: coords,
-        steps,
-        checkpoints: generateCheckpoints(coords, policeStations),
+        name: ai.name || FALLBACK_NAMES[i],
+        type: riskType as RouteOption["type"],
+        rsi: Math.min(100, Math.max(10, Math.round(ai.rsi))),
+        color: COLOR_MAP[ai.risk] ?? FALLBACK_COLOR[i],
+        reasons: ai.reasons?.length ? ai.reasons : FALLBACK_REASONS[i],
       };
-    });
-  } catch (gmErr) {
-    console.warn("[GoogleDirs] Falling back to OSRM:", gmErr);
-    return fetchRealRoutes(s, e, incidentData);
-  }
+    }
+    // AI didn't return enough results — keep OSRM fallback values
+    return {
+      ...r,
+      id: `r${i + 1}`,
+      name: FALLBACK_NAMES[i],
+      type: FALLBACK_TYPES[i],
+      rsi: FALLBACK_RSI[i],
+      color: FALLBACK_COLOR[i],
+      reasons: FALLBACK_REASONS[i],
+    };
+  });
 }
 
 function computeBearing(prev: { lat: number; lng: number }, next: { lat: number; lng: number }) {
@@ -956,6 +1023,61 @@ function ShareModal({ origin, destination, onClose }: { origin: string; destinat
 }
 
 /* \u2500\u2500 Navigation Map Controller: follows user location during nav mode \u2500\u2500 */
+/* ── Returns current map zoom level, updates on every zoom change ── */
+function useMapZoom() {
+  const map = useMap();
+  const [zoom, setZoom] = useState(() => map.getZoom());
+  useEffect(() => {
+    const handler = () => setZoom(map.getZoom());
+    map.on("zoomend", handler);
+    return () => { map.off("zoomend", handler); };
+  }, [map]);
+  return zoom;
+}
+
+/* ── Police cluster layer — hidden when zoomed out beyond level 11 ── */
+function PoliceClusterLayer({
+  stations,
+  onNavigateTo,
+}: {
+  stations: typeof policeStations;
+  onNavigateTo: (name: string, lat: number, lng: number) => void;
+}) {
+  const zoom = useMapZoom();
+  if (zoom < 11) return null;
+  return (
+    <MarkerClusterGroup
+      chunkedLoading
+      maxClusterRadius={50}
+      iconCreateFunction={(cluster: { getChildCount: () => number }) => {
+        const count = cluster.getChildCount();
+        const size = count < 10 ? 36 : count < 20 ? 42 : 48;
+        return L.divIcon({
+          html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:linear-gradient(135deg,#1d4ed8,#3b82f6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:${size < 40 ? 13 : 15}px;box-shadow:0 2px 8px rgba(59,130,246,0.55);border:2px solid #fff;">${count}</div>`,
+          className: "", iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+        });
+      }}
+    >
+      {stations.map((ps) => (
+        <Marker key={ps.id} position={[ps.lat, ps.lng]} icon={policeIconNew}>
+          <Popup>
+            <div className="p-1 min-w-[160px]">
+              <p className="font-semibold text-blue-700 text-sm">{ps.name}</p>
+              <p className="text-xs text-gray-500 mt-0.5">{ps.address}</p>
+              {ps.phone && <p className="text-xs mt-1">📞 {ps.phone}</p>}
+              <button
+                onClick={() => onNavigateTo(ps.name, ps.lat, ps.lng)}
+                className="mt-2 w-full text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium py-1 px-2 rounded transition-colors"
+              >
+                🗺 Get Directions
+              </button>
+            </div>
+          </Popup>
+        </Marker>
+      ))}
+    </MarkerClusterGroup>
+  );
+}
 function NavMapController({
   userLoc,
 }: {
@@ -1300,7 +1422,7 @@ export default function Dashboard() {
     staleTime: 2 * 60 * 1000,
   });
 
-  const mapIncidents = overview?.incidents?.length ? overview.incidents : incidents;
+  const mapIncidents = overview?.incidents ?? [];
   const mapClusters = overview?.clusters ?? [];
   const mapHeat = overview?.heatmap ?? [];
   const stationData  = overview?.policeStations?.length ? overview.policeStations : policeStations;
@@ -1477,6 +1599,27 @@ export default function Dashboard() {
     }
   };
 
+  const navigateToStation = useCallback(async (name: string, lat: number, lng: number) => {
+    const loc: DemoLocation = { name, lat, lng };
+    setDestination(name);
+    setDestLoc(loc);
+    const s = originLoc || (userLoc ? { name: "My Location", lat: userLoc.lat, lng: userLoc.lng } : resolveLocation2(origin));
+    if (!s) { setSearchError("Enable location or set an origin first."); return; }
+    setIsSearching(true);
+    setSearchError("");
+    try {
+      const gen = await fetchGoogleMapsRoutes(s, loc, mapIncidents);
+      setRoutes(gen);
+      setSelectedRoute(gen[0]);
+      setHasSearched(true);
+      setExpandedRouteId(gen[0]?.id ?? null);
+      setDeviationAlert(false);
+      setProximityAlert(false);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [originLoc, userLoc, origin, mapIncidents]);
+
   const pickRoute = (r: RouteOption) => {
     setSelectedRoute(r);
     setExpandedRouteId((prev) => (prev === r.id ? null : r.id));
@@ -1598,18 +1741,8 @@ export default function Dashboard() {
             />
           ))}
 
-          {/* Police stations */}
-          {showPolice && stationData.map((ps) => (
-            <Marker key={ps.id} position={[ps.lat, ps.lng]} icon={policeIconNew}>
-              <Popup>
-                <strong className="block text-sm">{ps.name}</strong>
-                <span className="text-xs text-gray-500 block mt-0.5">{ps.address}</span>
-                {ps.jurisdiction && <span className="text-[10px] text-blue-600 font-medium block mt-0.5">Area: {ps.jurisdiction}</span>}
-                <a href={`tel:${ps.phone}`} className="text-xs font-medium text-blue-600 mt-0.5 block">{ps.phone}</a>
-                <a href={`https://www.google.com/maps/dir/?api=1&destination=${ps.lat},${ps.lng}`} target="_blank" rel="noreferrer" className="text-[11px] text-blue-500 underline block mt-1">Get Directions →</a>
-              </Popup>
-            </Marker>
-          ))}
+          {/* Police stations — clustered, hidden when zoomed out */}
+          {showPolice && <PoliceClusterLayer stations={stationData} onNavigateTo={navigateToStation} />}
 
           {/* Safe zones — police stations, hospitals, commercial */}
           {showSafeZones && safeZones.map((z, i) => {
@@ -1726,7 +1859,7 @@ export default function Dashboard() {
 
         {!navMode && <div
           className="absolute left-2 right-2 md:left-3 md:right-auto top-2 md:top-3 z-[500] flex flex-col gap-2 md:w-[340px]"
-          style={{ maxHeight: "calc(100dvh - 80px)", overflowY: "auto", overflowX: "hidden" }}
+          style={{ maxHeight: "calc(100dvh - 80px)", overflowY: "visible", overflowX: "visible" }}
         >
           {/* Search card */}
           <motion.div
