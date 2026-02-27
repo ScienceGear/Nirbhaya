@@ -1,5 +1,10 @@
 const SAFECITY_BASE_URL = "https://webapp.safecity.in";
 
+/* ── Simple in-memory cache (TTL: 10 minutes) ── */
+let _cache = null;
+let _cacheTs = 0;
+const CACHE_TTL_MS = 10 * 60 * 1000;
+
 function toNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -98,6 +103,11 @@ export async function getSafeCityMapData({
   mapZoom = 11,
   city = "Pune",
 }) {
+  // Return cached data if fresh
+  if (_cache && Date.now() - _cacheTs < CACHE_TTL_MS) {
+    return _cache;
+  }
+
   const bounds = createBoundsFromCenter(centerLat, centerLng, radiusKm);
 
   const params = {
@@ -134,16 +144,21 @@ export async function getSafeCityMapData({
         : []
       : [];
 
+  // Geographic filter — only keep points within the requested bounding box
+  const inBounds = (lat, lng) =>
+    lat >= bounds.sw.lat && lat <= bounds.ne.lat &&
+    lng >= bounds.sw.lng && lng <= bounds.ne.lng;
+
   const clusters = dedupeByCoordinate(
     rawClusters
       .map((item, index) => normalizeCluster(item, index))
-      .filter(Boolean)
+      .filter((c) => c !== null && inBounds(c.lat, c.lng))
   );
 
   const incidents = dedupeByCoordinate(
     rawIncidents
       .map((item, index) => normalizeIncident(item, index))
-      .filter(Boolean)
+      .filter((inc) => inc !== null && inBounds(inc.lat, inc.lng))
   );
 
   const heatmap = [
@@ -159,9 +174,15 @@ export async function getSafeCityMapData({
     })),
   ];
 
-  return {
+  const result = {
     incidents,
     clusters,
     heatmap,
   };
+
+  // Cache the result
+  _cache = result;
+  _cacheTs = Date.now();
+
+  return result;
 }

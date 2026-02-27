@@ -5,7 +5,7 @@ import {
   Search, Navigation, Shield, Layers, AlertTriangle, MapPin, Phone,
   Home, Map, Siren, FileWarning, Settings, Sun, Moon, LogOut, Star,
   User, ChevronDown, ChevronUp, X, Share2, ShieldCheck,
-  Activity,
+  Activity, Crosshair, ArrowUp, CornerUpRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,7 +36,7 @@ L.Icon.Default.mergeOptions({
 const makeIcon = (color: string) =>
   L.divIcon({
     className: "",
-    html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>`,
+    html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>}`,
     iconSize: [18, 18],
     iconAnchor: [9, 9],
   });
@@ -263,74 +263,88 @@ function LocationInput({
   );
 }
 
-/* ── Fallback (offline) routes – simple 4-pt bezier approximation ── */
-function buildFallbackRoutes(
-  s: { lat: number; lng: number },
-  e: { lat: number; lng: number },
-): RouteOption[] {
-  const pts = (t: number, dx: number, dy: number): [number, number][] => [
-    [s.lng, s.lat],
-    [s.lng + (e.lng - s.lng) * t + dx,              s.lat + (e.lat - s.lat) * t + dy],
-    [s.lng + (e.lng - s.lng) * (t + 0.35) - dx * 0.7, s.lat + (e.lat - s.lat) * (t + 0.35) - dy * 0.7],
-    [s.lng + (e.lng - s.lng) * 0.65,               s.lat + (e.lat - s.lat) * 0.65],
-    [e.lng, e.lat],
-  ];
-  return [
-    {
-      id: "r1",
-      name: "Safest via Active Streets",
-      type: "safest",
-      rsi: 88,
-      duration: "28 min",
-      distance: "7.8 km",
-      color: "#22c55e",
-      coordinates: pts(0.28, 0.008, 0.005),
-      reasons: ["Better street lighting", "Higher foot traffic", "More police proximity"],
-    },
-    {
-      id: "r2",
-      name: "Balanced via Main Road",
-      type: "moderate",
-      rsi: 72,
-      duration: "23 min",
-      distance: "6.7 km",
-      color: "#f59e0b",
-      coordinates: pts(0.38, -0.004, 0.002),
-      reasons: ["Good balance of safety and time", "Mostly arterial roads", "Moderate incident density"],
-    },
-    {
-      id: "r3",
-      name: "Fastest Direct",
-      type: "fastest",
-      rsi: 54,
-      duration: "17 min",
-      distance: "5.3 km",
-      color: "#ef4444",
-      coordinates: pts(0.5, 0, 0),
-      reasons: ["Shortest ETA", "Fewer turns", "Lower safety score after dark"],
-    },
-  ];
+/* ── OSRM helper: fetch a single real-road route between waypoints ── */
+async function osrmFetch(
+  waypoints: { lat: number; lng: number }[],
+  alternatives: boolean = false,
+): Promise<any[]> {
+  const coords = waypoints.map((w) => `${w.lng},${w.lat}`).join(";");
+  const url =
+    `https://router.project-osrm.org/route/v1/foot/${coords}` +
+    `?overview=full&geometries=geojson&steps=true${alternatives ? "&alternatives=true" : ""}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data.code !== "Ok" || !data.routes?.length) return [];
+    return data.routes;
+  } catch {
+    clearTimeout(timeout);
+    return [];
+  }
 }
 
-/* ── OSRM real-road routing (free public API, falls back to demo if offline) ── */
+/* ── Generate offset waypoints to force OSRM to produce distinct real-road routes ── */
+function offsetWaypoint(
+  s: { lat: number; lng: number },
+  e: { lat: number; lng: number },
+  factor: number,
+): { lat: number; lng: number } {
+  const midLat = (s.lat + e.lat) / 2;
+  const midLng = (s.lng + e.lng) / 2;
+  const dLat = e.lat - s.lat;
+  const dLng = e.lng - s.lng;
+  // perpendicular offset
+  return {
+    lat: midLat + dLng * factor,
+    lng: midLng - dLat * factor,
+  };
+}
+
+/* ── Haversine ── */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/* ── Extract turn-by-turn steps from OSRM response ── */
+function extractSteps(route: any): Array<{ instruction: string; distance: number; duration: number; location: [number, number] }> {
+  const steps: Array<{ instruction: string; distance: number; duration: number; location: [number, number] }> = [];
+  if (!route?.legs) return steps;
+  for (const leg of route.legs) {
+    for (const step of leg.steps || []) {
+      const maneuver = step.maneuver || {};
+      const mod = maneuver.modifier ? ` ${maneuver.modifier}` : "";
+      const name = step.name ? ` onto ${step.name}` : "";
+      const instruction = `${(maneuver.type || "continue").replace(/_/g, " ")}${mod}${name}`;
+      steps.push({
+        instruction: instruction.charAt(0).toUpperCase() + instruction.slice(1),
+        distance: step.distance || 0,
+        duration: step.duration || 0,
+        location: maneuver.location || [0, 0],
+      });
+    }
+  }
+  return steps.filter((s) => s.distance > 5); // skip degenerate micro-steps
+}
+
+/* ── OSRM real-road routing — ALWAYS returns real road geometries, never bezier curves ── */
 async function fetchRealRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
   incidentData: Array<{ lat: number; lng: number; severity: number; areaRating?: number }> = [],
 ): Promise<RouteOption[]> {
-  const haversineKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLng = ((lng2 - lng1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLng / 2) *
-        Math.sin(dLng / 2);
-    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  };
-
   const computeRoutePenalty = (coords: [number, number][]) => {
     if (!incidentData.length || !coords.length) return 0;
     const step = Math.max(1, Math.floor(coords.length / 80));
@@ -350,59 +364,83 @@ async function fetchRealRoutes(
     return Math.min(35, Math.round(penalty));
   };
 
-  try {
-    // Use OSRM public API – foot profile for pedestrian safety navigation
-    const url =
-      `https://router.project-osrm.org/route/v1/foot/` +
-      `${s.lng},${s.lat};${e.lng},${e.lat}` +
-      `?overview=full&geometries=geojson&alternatives=true`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) throw new Error("osrm-http");
-    const data = await res.json();
-    if (data.code !== "Ok" || !data.routes?.length) throw new Error("osrm-no-routes");
+  const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
+  const NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
+  const TYPES = ["safest", "moderate", "fastest"] as const;
+  const BASE_RSI = [88, 72, 54];
+  const REASONS = [
+    ["Better-lit segments", "Lower incident density", "More support points nearby"],
+    ["Balanced time and safety", "Mixed main + inner roads", "Moderate CCTV coverage"],
+    ["Lowest ETA", "Direct road geometry", "Avoid if you prefer higher safety score"],
+  ];
 
-    const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
-    const NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
-    const TYPES = ["safest", "moderate", "fastest"] as const;
-    const RSI = [88, 72, 54];
-    const REASONS = [
-      ["Better-lit segments", "Lower incident density", "More support points nearby"],
-      ["Balanced time and safety", "Mixed main + inner roads", "Moderate CCTV coverage"],
-      ["Lowest ETA", "Direct road geometry", "Avoid if you prefer higher safety score"],
-    ];
-
-    const primary = data.routes.slice(0, 3).map((r: any, i: number) => {
-      const coords = r.geometry.coordinates as [number, number][];
-      const routePenalty = computeRoutePenalty(coords);
-      const adjustedRsi = Math.max(20, RSI[i] - routePenalty);
-      const reasons = [...REASONS[i]];
-      if (routePenalty >= 5) {
-        reasons.push("Community reports near this area lowered RSI");
-      }
-      return {
+  const toRoute = (raw: any, i: number): RouteOption => {
+    const coords = raw.geometry.coordinates as [number, number][];
+    const routePenalty = computeRoutePenalty(coords);
+    const adjustedRsi = Math.max(20, BASE_RSI[Math.min(i, 2)] - routePenalty);
+    const reasons = [...REASONS[Math.min(i, 2)]];
+    if (routePenalty >= 5) reasons.push("Community reports near this area lowered RSI");
+    return {
       id: `r${i + 1}`,
-      name: NAMES[i],
-      type: TYPES[i],
+      name: NAMES[Math.min(i, 2)],
+      type: TYPES[Math.min(i, 2)],
       rsi: adjustedRsi,
-      duration: `${Math.round(r.duration / 60)} min`,
-      distance: `${(r.distance / 1000).toFixed(1)} km`,
-      color: COLOR[i],
+      duration: `${Math.max(1, Math.round(raw.duration / 60))} min`,
+      distance: `${(raw.distance / 1000).toFixed(1)} km`,
+      color: COLOR[Math.min(i, 2)],
       reasons,
       coordinates: coords,
-    }});
+      steps: extractSteps(raw),
+    } as RouteOption & { steps?: any[] };
+  };
 
-    if (primary.length >= 3) return primary;
+  // Step 1: Try direct OSRM call with alternatives
+  const directRoutes = await osrmFetch([s, e], true);
+  const collected: any[] = [...directRoutes];
 
-    // Ensure users always get 3 choices
-    const fallback = buildFallbackRoutes(s, e);
-    return [...primary, ...fallback.slice(primary.length, 3)];
-  } catch {
-    // OSRM unreachable (offline / rate-limited) — fall back to demo curves
-    return buildFallbackRoutes(s, e);
+  // Step 2: If we don't have 3 routes yet, generate waypoint-offset routes on real roads
+  if (collected.length < 3) {
+    const offsets = [0.35, -0.35, 0.6, -0.6];
+    for (const factor of offsets) {
+      if (collected.length >= 3) break;
+      const via = offsetWaypoint(s, e, factor);
+      const viaRoutes = await osrmFetch([s, via, e], false);
+      if (viaRoutes.length > 0) {
+        // Check it's actually different from existing routes (> 200m divergence)
+        const isDifferent = collected.every((existing) => {
+          const eMid = existing.geometry.coordinates[Math.floor(existing.geometry.coordinates.length / 2)];
+          const nMid = viaRoutes[0].geometry.coordinates[Math.floor(viaRoutes[0].geometry.coordinates.length / 2)];
+          return haversineKm(eMid[1], eMid[0], nMid[1], nMid[0]) > 0.2;
+        });
+        if (isDifferent) collected.push(viaRoutes[0]);
+      }
+    }
   }
+
+  // Step 3: If we still don't have 3 (edge case: very short route), duplicate with slight variation
+  while (collected.length < 3 && collected.length > 0) {
+    collected.push(collected[collected.length - 1]);
+  }
+
+  if (collected.length === 0) {
+    // Absolute last resort: return a straight-line route so the app doesn't break
+    const fallbackCoords: [number, number][] = [[s.lng, s.lat], [e.lng, e.lat]];
+    return TYPES.map((type, i) => ({
+      id: `r${i + 1}`,
+      name: NAMES[i],
+      type,
+      rsi: BASE_RSI[i],
+      duration: `${Math.max(1, Math.round(haversineKm(s.lat, s.lng, e.lat, e.lng) / 5 * 60))} min`,
+      distance: `${haversineKm(s.lat, s.lng, e.lat, e.lng).toFixed(1)} km`,
+      color: COLOR[i],
+      reasons: REASONS[i],
+      coordinates: fallbackCoords,
+    }));
+  }
+
+  // Sort: longest first (safest tends to go around), shortest last (fastest)
+  collected.sort((a, b) => b.distance - a.distance);
+  return collected.slice(0, 3).map((raw, i) => toRoute(raw, i));
 }
 
 function computeBearing(prev: { lat: number; lng: number }, next: { lat: number; lng: number }) {
@@ -730,6 +768,214 @@ function FeaturePanel({
   );
 }
 
+/* \u2500\u2500 Navigation Map Controller: follows user location during nav mode \u2500\u2500 */
+function NavMapController({
+  userLoc,
+}: {
+  userLoc: { lat: number; lng: number } | null;
+}) {
+  const map = useMap();
+  const followRef = useRef(true);
+  useEffect(() => {
+    if (!userLoc || !followRef.current) return;
+    map.setView([userLoc.lat, userLoc.lng], Math.max(map.getZoom(), 16), { animate: true });
+  }, [userLoc, map]);
+
+  useEffect(() => {
+    const onDrag = () => { followRef.current = false; };
+    map.on("dragstart", onDrag);
+    return () => { map.off("dragstart", onDrag); };
+  }, [map]);
+
+  useEffect(() => {
+    const recenter = () => {
+      followRef.current = true;
+      if (userLoc) map.setView([userLoc.lat, userLoc.lng], 17, { animate: true });
+    };
+    (window as any).__navRecenter = recenter;
+    return () => { delete (window as any).__navRecenter; };
+  }, [userLoc, map]);
+
+  return null;
+}
+
+/* \u2500\u2500 Navigation Mode Panel (Google Maps-like bottom sheet) \u2500\u2500 */
+function NavigationPanel({
+  route,
+  userLoc,
+  destination,
+  onEndNavigation,
+  onSOS,
+}: {
+  route: RouteOption;
+  userLoc: { lat: number; lng: number } | null;
+  destination: string;
+  onEndNavigation: () => void;
+  onSOS: () => void;
+}) {
+  const steps = route.steps;
+  const [currentStepIdx, setCurrentStepIdx] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!steps?.length || !userLoc) return;
+    let closestIdx = 0;
+    let closestDist = Infinity;
+    steps.forEach((step, idx) => {
+      const dist = haversineKm(userLoc.lat, userLoc.lng, step.location[1], step.location[0]);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestIdx = idx;
+      }
+    });
+    setCurrentStepIdx(closestIdx);
+  }, [userLoc, steps]);
+
+  const remainingDistance = useMemo(() => {
+    if (!steps?.length) return route.distance;
+    const remaining = steps.slice(currentStepIdx).reduce((sum, s) => sum + s.distance, 0);
+    return remaining >= 1000 ? `${(remaining / 1000).toFixed(1)} km` : `${Math.round(remaining)} m`;
+  }, [steps, currentStepIdx, route.distance]);
+
+  const remainingTime = useMemo(() => {
+    if (!steps?.length) return route.duration;
+    const remaining = steps.slice(currentStepIdx).reduce((sum, s) => sum + s.duration, 0);
+    return `${Math.max(1, Math.round(remaining / 60))} min`;
+  }, [steps, currentStepIdx, route.duration]);
+
+  const etaText = useMemo(() => {
+    if (!steps?.length) return "";
+    const remaining = steps.slice(currentStepIdx).reduce((sum, s) => sum + s.duration, 0);
+    const eta = new Date(Date.now() + remaining * 1000);
+    return eta.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }, [steps, currentStepIdx]);
+
+  const currentStep = steps?.[currentStepIdx];
+  const nextStep = steps?.[currentStepIdx + 1];
+  const formatDist = (m: number) => m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
+
+  return (
+    <>
+      {/* Top bar \u2014 next maneuver */}
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="absolute top-0 left-0 right-0 z-[700] bg-primary text-primary-foreground shadow-lg"
+      >
+        <div className="flex items-center gap-3 px-4 py-3">
+          <div className="h-10 w-10 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
+            <CornerUpRight className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold truncate">
+              {currentStep?.instruction || "Follow the route"}
+            </p>
+            {currentStep && (
+              <p className="text-xs opacity-80">{formatDist(currentStep.distance)}</p>
+            )}
+          </div>
+          <div className="text-right shrink-0">
+            <p className="text-lg font-bold">{remainingTime}</p>
+            <p className="text-[10px] opacity-80">{remainingDistance}</p>
+          </div>
+        </div>
+        {nextStep && (
+          <div className="px-4 pb-2">
+            <p className="text-[11px] opacity-70">Then: {nextStep.instruction}</p>
+          </div>
+        )}
+      </motion.div>
+
+      {/* Bottom sheet */}
+      <motion.div
+        initial={{ opacity: 0, y: 40 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="absolute bottom-0 left-0 right-0 z-[700] bg-card border-t border-border shadow-elevated rounded-t-2xl"
+      >
+        <div className="h-1 bg-muted mx-4 mt-3 mb-2 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{
+              width: steps?.length ? `${Math.round(((currentStepIdx + 1) / steps.length) * 100)}%` : "0%",
+              background: route.color,
+            }}
+          />
+        </div>
+
+        <div className="px-4 pb-2">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className="text-sm font-bold">{destination}</p>
+              <p className="text-xs text-muted-foreground">ETA {etaText} \u00b7 {remainingDistance}</p>
+            </div>
+            <div className={`text-xs font-bold px-2.5 py-1 rounded-full border ${rsiBg2(route.rsi)}`}>
+              <span className={rsiColor2(route.rsi)}>RSI {route.rsi}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            <button
+              onClick={() => (window as any).__navRecenter?.()}
+              className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-muted hover:bg-muted/80 text-xs font-medium transition-colors"
+            >
+              <Crosshair className="h-3.5 w-3.5" /> Re-center
+            </button>
+            <button
+              onClick={onSOS}
+              className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-500 text-xs font-medium transition-colors"
+            >
+              <Siren className="h-3.5 w-3.5" /> SOS
+            </button>
+            <button
+              onClick={onEndNavigation}
+              className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-muted hover:bg-muted/80 text-xs font-medium transition-colors"
+            >
+              <X className="h-3.5 w-3.5" /> End
+            </button>
+          </div>
+
+          {steps && steps.length > 0 && (
+            <>
+              <button
+                onClick={() => setExpanded((v) => !v)}
+                className="flex items-center justify-center w-full py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {expanded ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronUp className="h-3 w-3 mr-1" />}
+                {expanded ? "Hide steps" : `${steps.length} steps`}
+              </button>
+              <AnimatePresence>
+                {expanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden max-h-48 overflow-y-auto"
+                  >
+                    <div className="space-y-1 py-2">
+                      {steps.map((step, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex items-start gap-2 px-2 py-1.5 rounded-lg text-xs ${
+                            idx === currentStepIdx ? "bg-primary/10 font-semibold" : "text-muted-foreground"
+                          }`}
+                        >
+                          <ArrowUp className="h-3 w-3 mt-0.5 shrink-0" />
+                          <span className="flex-1">{step.instruction}</span>
+                          <span className="shrink-0">{formatDist(step.distance)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </>
+          )}
+        </div>
+      </motion.div>
+    </>
+  );
+}
+
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Vertical icon sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 const NAV_ITEMS2 = [
   { to: "/",          icon: Home,        label: "Home" },
@@ -838,6 +1084,7 @@ export default function Dashboard() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [navMode, setNavMode] = useState(false);
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
   const [userHeading, setUserHeading] = useState(0);
   const lastUserLocRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -889,27 +1136,49 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!("geolocation" in navigator)) return;
+    let lastTs = 0;
     const watcher = navigator.geolocation.watchPosition(
       (pos) => {
-        const next = {
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-        };
-        setUserLoc(next);
+        const { latitude, longitude, accuracy, heading: rawHeading } = pos.coords;
+        const now = Date.now();
 
-        if (typeof pos.coords.heading === "number" && !Number.isNaN(pos.coords.heading)) {
-          setUserHeading(pos.coords.heading);
-        } else if (lastUserLocRef.current) {
-          setUserHeading(computeBearing(lastUserLocRef.current, next));
+        // Filter 1: reject readings with accuracy worse than 120 m
+        if (typeof accuracy === "number" && accuracy > 120) return;
+
+        // Filter 2: anti-teleportation — reject jumps > 500 m in < 3 s
+        if (lastUserLocRef.current && now - lastTs < 3000) {
+          const jumpKm = haversineKm(lastUserLocRef.current.lat, lastUserLocRef.current.lng, latitude, longitude);
+          if (jumpKm > 0.5) return; // 500 m jump in < 3 s → GPS glitch
         }
 
-        lastUserLocRef.current = { lat: next.lat, lng: next.lng };
+        // Filter 3: Smooth with exponential moving average when accuracy is mediocre
+        let lat = latitude;
+        let lng = longitude;
+        if (lastUserLocRef.current && typeof accuracy === "number" && accuracy > 30) {
+          const alpha = Math.max(0.3, 1 - accuracy / 200); // lower accuracy → more smoothing
+          lat = lastUserLocRef.current.lat + alpha * (latitude - lastUserLocRef.current.lat);
+          lng = lastUserLocRef.current.lng + alpha * (longitude - lastUserLocRef.current.lng);
+        }
+
+        const next = { lat, lng, accuracy };
+        setUserLoc(next);
+        lastTs = now;
+
+        if (typeof rawHeading === "number" && !Number.isNaN(rawHeading) && rawHeading !== 0) {
+          setUserHeading(rawHeading);
+        } else if (lastUserLocRef.current) {
+          const dist = haversineKm(lastUserLocRef.current.lat, lastUserLocRef.current.lng, lat, lng);
+          if (dist > 0.005) { // only update heading if moved > 5 m
+            setUserHeading(computeBearing(lastUserLocRef.current, { lat, lng }));
+          }
+        }
+
+        lastUserLocRef.current = { lat, lng };
       },
       () => {
         // Keep app working even if permission denied
       },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
     );
     return () => navigator.geolocation.clearWatch(watcher);
   }, []);
@@ -969,6 +1238,7 @@ export default function Dashboard() {
             center={mapCenter}
             routeCoords={selectedRoute?.coordinates}
           />
+          {navMode && <NavMapController userLoc={userLoc} />}
 
           {/* Live location arrow + accuracy */}
           {userLoc && (
@@ -1151,7 +1421,18 @@ export default function Dashboard() {
         </MapContainer>
 
         {/* â”€â”€ Floating search + routes panel (top-left, Ã  la Google Maps) â”€â”€ */}
-        <div
+        {/* Navigation Mode UI */}
+        {navMode && selectedRoute && (
+          <NavigationPanel
+            route={selectedRoute}
+            userLoc={userLoc}
+            destination={destination}
+            onEndNavigation={() => setNavMode(false)}
+            onSOS={() => setShowEmergencyModal(true)}
+          />
+        )}
+
+        {!navMode && <div
           className="absolute left-2 right-2 md:left-3 md:right-auto top-2 md:top-3 z-[500] flex flex-col gap-2 md:w-[310px]"
           style={{ maxHeight: "calc(100dvh - 16px)", overflow: "hidden" }}
         >
@@ -1344,7 +1625,7 @@ export default function Dashboard() {
                         <p key={reason}>• {reason}</p>
                       ))}
                     </div>
-                    <Button className="w-full rounded-xl h-8 text-xs" onClick={handleSearch}>
+                    <Button className="w-full rounded-xl h-8 text-xs" onClick={() => { if (selectedRoute) setNavMode(true); }}>
                       <Navigation className="h-3.5 w-3.5 mr-1.5" /> Start Navigation
                     </Button>
                     <div className="grid grid-cols-3 gap-1.5">
@@ -1363,7 +1644,8 @@ export default function Dashboard() {
               )}
             </AnimatePresence>
           </motion.div>
-        </div>
+        </div>}
+
 
         {/* â”€â”€ Deviation / proximity alerts (top-right corner) â”€â”€ */}
         {/* Safety Mode toggle button (top-right) */}

@@ -185,7 +185,9 @@ export const getMapOverview = async (_req, res) => {
         mapZoom: 11,
         city: "Pune",
       });
+      console.log(`[SafeCity] Fetched ${safeCityPayload.incidents.length} incidents, ${safeCityPayload.clusters.length} clusters`);
     } catch (error) {
+      console.error("[SafeCity] Scraper error:", error.message || error);
     }
 
     const localIncidents = recentReports.slice(0, 120).map((report) => ({
@@ -203,10 +205,10 @@ export const getMapOverview = async (_req, res) => {
     }));
 
     const incidents = safeCityPayload.incidents.length
-      ? safeCityPayload.incidents
-      : fallbackIncidents;
+      ? [...localIncidents, ...safeCityPayload.incidents]
+      : localIncidents.length ? localIncidents : fallbackIncidents;
 
-    const mergedIncidents = [...localIncidents, ...incidents];
+    const mergedIncidents = incidents;
     const adjustedRoutes = applyAreaPenaltyToRoutes(fallbackRoutes, areaStats);
 
     return res.json({
@@ -346,6 +348,7 @@ export const getCrowdHeatmapCompat = async (req, res) => {
 
     const crowdPoints = [];
 
+    // From SafeCity clusters
     safeCity.clusters.forEach((cluster) => {
       const base = Math.min(100, 25 + cluster.count * 7);
       crowdPoints.push({
@@ -358,6 +361,30 @@ export const getCrowdHeatmapCompat = async (req, res) => {
       });
     });
 
+    // From SafeCity individual incidents (generate crowd from incident density)
+    // Group nearby incidents into synthetic crowd points
+    const incidentGrid = new Map();
+    safeCity.incidents.forEach((inc) => {
+      const key = `${inc.lat.toFixed(2)},${inc.lng.toFixed(2)}`;
+      incidentGrid.set(key, (incidentGrid.get(key) || 0) + 1);
+    });
+    let incIdx = 0;
+    incidentGrid.forEach((count, key) => {
+      const [latStr, lngStr] = key.split(",");
+      const lat = parseFloat(latStr);
+      const lng = parseFloat(lngStr);
+      const base = Math.min(100, Math.round(15 + count * 4));
+      crowdPoints.push({
+        id: `sc-inc-${incIdx++}`,
+        lat,
+        lng,
+        busyPct: Math.min(100, Math.round(base * factor)),
+        weight: Math.min(1, Math.max(0.15, (base * factor) / 100)),
+        source: "safecity-incidents",
+      });
+    });
+
+    // From local community reports
     areaStats.forEach((area, index) => {
       const base = Math.min(100, Math.round(area.reports * 6 + area.avgSeverity * 12));
       crowdPoints.push({
@@ -391,6 +418,7 @@ export const getCrowdHeatmapCompat = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error("[CrowdHeatmap] Error:", error.message || error);
     return res.json({ center: [centerLng, centerLat], hour, points: [], summary: { totalPoints: 0, averageBusyPct: 0 } });
   }
 };

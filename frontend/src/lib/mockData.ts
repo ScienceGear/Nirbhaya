@@ -36,6 +36,7 @@ export interface RouteOption {
   color: string;
   coordinates: [number, number][];
   reasons?: string[];
+  steps?: Array<{ instruction: string; distance: number; duration: number; location: [number, number] }>;
 }
 
 export interface TrustedContact {
