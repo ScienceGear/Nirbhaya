@@ -1,5 +1,5 @@
 import { latLngToCell, gridDisk } from "h3-js";
-import HexZone from "../backend/model/hex.model.js";
+import HexZone from "../model/hex.model.js";
 
 export const getHex =  async (req, res) => {
   const { lat, lng } = req.query;

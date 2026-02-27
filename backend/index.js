@@ -1,12 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import trackerRouter from './backend/routes/tracker.route.js';
-import authRouter from './backend/routes/auth.routes.js';
-import hexRouter from './backend/routes/hex.route.js';
-import reportRouter from './backend/routes/report.routes.js';
+import trackerRouter from './routes/tracker.route.js';
+import authRouter from './routes/auth.routes.js';
+import hexRouter from './routes/hex.route.js';
+import reportRouter from './routes/report.routes.js';
 import dotenv from 'dotenv';
-import {server,app,io} from './backend/library/socket.js';
-import { connectdb } from './backend/library/db.js';
+import {server,app,io} from './library/socket.js';
+import { connectdb } from './library/db.js';
 import cookieParser from 'cookie-parser';
 dotenv.config();
 app.use(cors(({

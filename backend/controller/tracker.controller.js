@@ -1,5 +1,5 @@
-import  {getSafeWaypoint}  from "../backend/library/groq.library.js";
-import PoliceStation from "../backend/model/policestations.model.js";
+import  {getSafeWaypoint}  from "../library/groq.library.js";
+import PoliceStation from "../model/policestations.model.js";
 export const searchLocation = async (req,res)=>{
       const query = req.body.query;
       if(query.length === 0) return res.status(400).json({message: "Query is required"});

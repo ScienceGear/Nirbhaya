@@ -1,6 +1,6 @@
 import express from 'express';
-import { SafePath, searchLocation } from '../backend/controller/tracker.controller.js';
-import { showPoliceStations } from '../backend/controller/tracker.controller.js';
+import { SafePath, searchLocation } from '../controller/tracker.controller.js';
+import { showPoliceStations } from '../controller/tracker.controller.js';
 const trackerRouter = express.Router();
 
 trackerRouter.post('/search', searchLocation);
