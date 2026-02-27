@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { AlertTriangle, MapPin, Send, Shield, CheckCircle, Upload, Star, Trophy, LocateFixed } from "lucide-react";
+import { AlertTriangle, MapPin, Send, CheckCircle, Camera, Star, Trophy, LocateFixed } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -100,11 +100,11 @@ export default function ReportPage() {
   return (
     <div className="min-h-[100dvh] flex bg-background">
       <DashboardNav />
-      <main className="flex-1 overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-24 md:pb-10">
-      <div className="container mx-auto max-w-3xl space-y-8">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center">
-          <h1 className="font-display text-3xl font-bold mb-2">{t("report.title")}</h1>
-          <p className="text-muted-foreground text-sm">Your report helps keep other women safe. All reports can be anonymous.</p>
+      <main className="flex-1 overflow-y-auto px-3 md:px-6 pt-4 pb-24 md:pb-10">
+      <div className="container mx-auto max-w-3xl space-y-5">
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="text-center">
+          <h1 className="font-display text-2xl font-bold mb-1">{t("report.title")}</h1>
+          <p className="text-muted-foreground text-xs">Your report helps keep other women safe. All reports can be anonymous.</p>
         </motion.div>
 
         <div className="p-4 rounded-2xl bg-primary/5 border border-primary/20 flex items-center justify-between">
@@ -184,15 +184,24 @@ export default function ReportPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>Upload Area Image (optional)</Label>
+                <Label>Upload / Capture Image (optional)</Label>
                 <div className="flex items-center gap-2">
-                  <Input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleImageUpload(e.target.files?.[0])}
-                    className="rounded-xl"
-                  />
-                  <Upload className="h-4 w-4 text-muted-foreground" />
+                  <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border bg-muted/40 cursor-pointer hover:bg-muted text-sm flex-1">
+                    <Camera className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <span className="text-muted-foreground truncate">
+                      {imageDataUrl ? "Image selected" : "Take photo or choose file"}
+                    </span>
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={(e) => handleImageUpload(e.target.files?.[0])}
+                    />
+                  </label>
+                  {imageDataUrl && (
+                    <button type="button" onClick={() => setImageDataUrl("")} className="text-xs text-destructive hover:underline shrink-0">Remove</button>
+                  )}
                 </div>
                 {imageDataUrl && (
                   <img src={imageDataUrl} alt="Area preview" className="h-24 w-full object-cover rounded-xl border border-border" />
@@ -207,8 +216,12 @@ export default function ReportPage() {
                 <Switch checked={anonymous} onCheckedChange={setAnonymous} />
               </div>
 
-              <Button type="submit" className="w-full rounded-xl">
-                <Send className="h-4 w-4 mr-2" /> Submit Report
+              <Button type="submit" disabled={submitMutation.isPending} className="w-full rounded-xl">
+                {submitMutation.isPending ? (
+                  <><span className="h-4 w-4 mr-2 rounded-full border-2 border-white/30 border-t-white animate-spin" />Submitting…</>
+                ) : (
+                  <><Send className="h-4 w-4 mr-2" /> Submit Report</>
+                )}
               </Button>
 
               {submitted && (
@@ -221,7 +234,7 @@ export default function ReportPage() {
             </form>
 
             {/* Share experience */}
-            <div className="mt-4 sm:mt-6 p-4 sm:p-6 rounded-2xl bg-primary/5 border border-primary/20 space-y-3">
+            <div className="mt-4 p-4 rounded-2xl bg-primary/5 border border-primary/20 space-y-3">
               <h3 className="font-display font-semibold">Share Your Experience</h3>
               <p className="text-sm text-muted-foreground">
                 We understand it can be difficult to share. This space is safe, supportive, and completely anonymous. Your story can help others.

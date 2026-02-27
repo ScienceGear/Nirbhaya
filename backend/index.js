@@ -16,6 +16,7 @@ const PORT = Number(process.env.PORT) || 3000;
 
 const allowedOrigins = [
     "http://localhost:5173",
+    "http://localhost:8080",
     "http://localhost:8084",
     "http://localhost:8083",
 ];

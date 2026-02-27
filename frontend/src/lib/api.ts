@@ -1,10 +1,12 @@
 import { defaultContacts, incidents, mockRoutes, policeStations, type TrustedContact } from "@/lib/mockData";
+import type { SharingPrefs } from "@/lib/auth";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    credentials: "include",
     ...init,
   });
 
@@ -106,4 +108,62 @@ export async function getCrowdHeatmap(params?: { lat?: number; lng?: number; rad
     points: Array<{ id: string; lat: number; lng: number; busyPct: number; weight: number; source: string }>;
     summary: { totalPoints: number; averageBusyPct: number };
   }>(`/api/crowd/heatmap${suffix}`);
+}
+
+/* ── Guardian & Sync APIs ── */
+
+export interface WatchedUser {
+  _id: string;
+  username: string;
+  email: string;
+  phone?: string;
+  lastLocation: { lat: number; lng: number; accuracy?: number; updatedAt?: string } | null;
+  batteryLevel: number | null;
+  isNavigating: boolean | null;
+  currentRoute: { origin: string; destination: string; rsi: number; eta: string; distance: string } | null;
+  checkpointsPassed: number | null;
+  checkpointsTotal: number | null;
+  lastSOS: { type: string; timestamp: string; location: string; lat?: number; lng?: number } | null;
+  sharingPrefs: SharingPrefs;
+}
+
+export async function linkGuardian(linkCode: string) {
+  return request<{ message: string; linkedUser: { _id: string; username: string; email: string } }>("/api/auth/link-guardian", {
+    method: "POST",
+    body: JSON.stringify({ linkCode }),
+  });
+}
+
+export async function getWatchedUsers() {
+  return request<{ watched: WatchedUser[] }>("/api/auth/watched-users");
+}
+
+export async function updateSharingPrefs(sharingPrefs: Partial<SharingPrefs>) {
+  return request<{ message: string; sharingPrefs: SharingPrefs }>("/api/auth/sharing-prefs", {
+    method: "PUT",
+    body: JSON.stringify({ sharingPrefs }),
+  });
+}
+
+export async function updateLocation(data: {
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  batteryLevel?: number;
+  isNavigating?: boolean;
+  currentRoute?: { origin: string; destination: string; rsi: number; eta: string; distance: string };
+  checkpointsPassed?: number;
+  checkpointsTotal?: number;
+}) {
+  return request<{ message: string }>("/api/auth/update-location", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function logSOS(data: { type: string; lat?: number; lng?: number; location?: string }) {
+  return request<{ message: string; points: number }>("/api/auth/log-sos", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
 }

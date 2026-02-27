@@ -68,7 +68,7 @@ export default function DashboardNav() {
   return (
     <>
       <aside
-        className="hidden md:flex z-[700] h-[100dvh] w-[68px] shrink-0 flex-col items-center border-r border-border bg-card py-2 gap-0.5"
+        className="hidden md:flex z-[700] sticky top-0 h-[100dvh] w-[68px] shrink-0 flex-col items-center border-r border-border bg-card py-2 gap-0.5 overflow-hidden"
         style={{ boxShadow: "2px 0 8px rgba(0,0,0,.08)" }}
       >
         <Link

@@ -5,13 +5,14 @@ import {
   Search, Navigation, Shield, Layers, AlertTriangle, MapPin, Phone,
   Home, Map, Siren, FileWarning, Settings, Sun, Moon, LogOut, Star,
   User, ChevronDown, ChevronUp, X, Share2, ShieldCheck,
-  Activity, Crosshair, ArrowUp, CornerUpRight, LocateFixed, Locate,
+  Activity, Crosshair, ArrowUp, CornerUpRight, LocateFixed, Locate, BatteryLow,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import AISafetyAssistant from "@/components/AISafetyAssistant";
 import {
-  mockRoutes, policeStations, incidents, PUNE_CENTER, demoLocations,
+  policeStations, incidents, PUNE_CENTER, demoLocations,
   safeZones, crimeHotspots,
-  type RouteOption, type DemoLocation,
+  type RouteOption, type DemoLocation, type RouteCheckpoint,
 } from "@/lib/mockData";
 import { useTheme } from "@/lib/theme";
 import { useAuth } from "@/lib/auth";
@@ -20,7 +21,7 @@ import DashboardNav from "@/components/DashboardNav";
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getCrowdHeatmap, getMapOverview } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview, updateLocation } from "@/lib/api";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 
 /* ─── Google Maps API config ─────────────────────────────────────────────── */
@@ -350,6 +351,94 @@ function extractSteps(route: any): Array<{ instruction: string; distance: number
   return steps.filter((s) => s.distance > 5); // skip degenerate micro-steps
 }
 
+/* ── Generate checkpoints along a route from nearby safe infrastructure ── */
+function generateCheckpoints(
+  coords: [number, number][],
+  stationData: typeof policeStations,
+  walkSpeedKmH = 5,
+): RouteCheckpoint[] {
+  if (coords.length < 2) return [];
+
+  // Pre-compute cumulative distance along the route (km)
+  const cumDist: number[] = [0];
+  for (let i = 1; i < coords.length; i++) {
+    cumDist.push(
+      cumDist[i - 1] +
+        haversineKm(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]),
+    );
+  }
+  const totalKm = cumDist[cumDist.length - 1];
+
+  // Build a list of nearby POIs (safe zones + police stations)
+  type POI = { name: string; lat: number; lng: number; type: RouteCheckpoint["type"]; distAlongRoute: number };
+  const candidates: POI[] = [];
+
+  const step = Math.max(1, Math.floor(coords.length / 120));
+
+  // Check safe zones
+  safeZones.forEach((sz) => {
+    let bestDist = Infinity;
+    let bestIdx = 0;
+    for (let i = 0; i < coords.length; i += step) {
+      const d = haversineKm(coords[i][1], coords[i][0], sz.lat, sz.lng);
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    }
+    if (bestDist <= 0.5) {
+      candidates.push({
+        name: sz.name,
+        lat: sz.lat,
+        lng: sz.lng,
+        type: sz.type === "hospital" ? "hospital" : sz.type === "police" ? "police" : "commercial",
+        distAlongRoute: cumDist[Math.min(bestIdx, cumDist.length - 1)],
+      });
+    }
+  });
+
+  // Check police stations
+  stationData.forEach((ps) => {
+    let bestDist = Infinity;
+    let bestIdx = 0;
+    for (let i = 0; i < coords.length; i += step) {
+      const d = haversineKm(coords[i][1], coords[i][0], ps.lat, ps.lng);
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    }
+    if (bestDist <= 0.6) {
+      candidates.push({
+        name: ps.name,
+        lat: ps.lat,
+        lng: ps.lng,
+        type: "police",
+        distAlongRoute: cumDist[Math.min(bestIdx, cumDist.length - 1)],
+      });
+    }
+  });
+
+  // Deduplicate (same name within 200m)
+  const unique: POI[] = [];
+  candidates.sort((a, b) => a.distAlongRoute - b.distAlongRoute);
+  for (const c of candidates) {
+    if (!unique.some((u) => u.name === c.name || haversineKm(u.lat, u.lng, c.lat, c.lng) < 0.2)) {
+      unique.push(c);
+    }
+  }
+
+  // Limit to 5 spread-out checkpoints (skip if too close to start or end)
+  const minDist = totalKm * 0.05;
+  const filtered = unique.filter(
+    (p) => p.distAlongRoute > minDist && p.distAlongRoute < totalKm - minDist,
+  );
+  const picked = filtered.slice(0, 5);
+
+  return picked.map((p) => ({
+    name: p.name,
+    type: p.type,
+    lat: p.lat,
+    lng: p.lng,
+    eta: `${Math.max(1, Math.round((p.distAlongRoute / walkSpeedKmH) * 60))} min`,
+    passed: false,
+  }));
+}
+
 /* ── OSRM real-road routing — ALWAYS returns real road geometries, never bezier curves ── */
 async function fetchRealRoutes(
   s: { lat: number; lng: number },
@@ -402,6 +491,7 @@ async function fetchRealRoutes(
       reasons,
       coordinates: coords,
       steps: extractSteps(raw),
+      checkpoints: generateCheckpoints(coords, policeStations),
     } as RouteOption & { steps?: any[] };
   };
 
@@ -452,6 +542,106 @@ async function fetchRealRoutes(
   // Sort: longest first (safest tends to go around), shortest last (fastest)
   collected.sort((a, b) => b.distance - a.distance);
   return collected.slice(0, 3).map((raw, i) => toRoute(raw, i));
+}
+
+/* ── Google Maps Directions API routing (primary, falls back to OSRM) ── */
+async function fetchGoogleMapsRoutes(
+  s: { lat: number; lng: number },
+  e: { lat: number; lng: number },
+  incidentData: Array<{ lat: number; lng: number; severity: number }> = [],
+): Promise<RouteOption[]> {
+  const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
+  const NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
+  const TYPES = ["safest", "moderate", "fastest"] as const;
+  const BASE_RSI = [88, 72, 54];
+  const REASONS = [
+    ["Better-lit segments", "Lower incident density", "More support points nearby"],
+    ["Balanced time and safety", "Mixed main + inner roads", "Moderate streetlighting"],
+    ["Lowest ETA", "Direct road geometry", "Consider higher safety routes"],
+  ];
+
+  const computePenalty = (coords: [number, number][]) => {
+    if (!incidentData.length) return 0;
+    const step = Math.max(1, Math.floor(coords.length / 80));
+    let penalty = 0;
+    incidentData.forEach((inc) => {
+      let minDist = Infinity;
+      for (let i = 0; i < coords.length; i += step) {
+        const d = haversineKm(coords[i][1], coords[i][0], inc.lat, inc.lng);
+        if (d < minDist) minDist = d;
+      }
+      if (minDist <= 1.2) penalty += (inc.severity || 1) * (1.3 - Math.min(minDist, 1));
+    });
+    return Math.min(35, Math.round(penalty));
+  };
+
+  try {
+    const gwin = window as any;
+    if (!gwin.google?.maps?.DirectionsService) {
+      await importLibrary("routes");
+    }
+    const gmaps = gwin.google.maps;
+    const svc = new gmaps.DirectionsService();
+
+    const result = await new Promise<any>((resolve, reject) => {
+      svc.route(
+        {
+          origin: { lat: s.lat, lng: s.lng },
+          destination: { lat: e.lat, lng: e.lng },
+          travelMode: gmaps.TravelMode.WALKING,
+          provideRouteAlternatives: true,
+          region: "IN",
+        },
+        (response: any, status: string) => {
+          if (status === "OK") resolve(response);
+          else reject(new Error(`Directions: ${status}`));
+        }
+      );
+    });
+
+    if (!result.routes?.length) throw new Error("No routes returned");
+
+    const sorted = [...result.routes]
+      .sort((a: any, b: any) => (b.legs[0]?.distance?.value ?? 0) - (a.legs[0]?.distance?.value ?? 0))
+      .slice(0, 3);
+
+    // Pad to 3 if fewer alternatives returned
+    while (sorted.length < 3) sorted.push(sorted[sorted.length - 1]);
+
+    return sorted.map((gmRoute: any, i: number) => {
+      const leg = gmRoute.legs[0];
+      const path: any[] = gmRoute.overview_path ?? [];
+      const coords: [number, number][] = path.map((p: any) => [p.lng(), p.lat()]);
+      const penalty = computePenalty(coords);
+      const rsi = Math.max(20, BASE_RSI[Math.min(i, 2)] - penalty);
+      const reasons = [...REASONS[Math.min(i, 2)]];
+      if (penalty >= 5) reasons.push("Community reports reduced safety score");
+
+      const steps = (leg.steps ?? []).map((step: any) => ({
+        instruction: step.instructions.replace(/<[^>]+>/g, "").trim(),
+        distance: step.distance?.value ?? 0,
+        duration: step.duration?.value ?? 0,
+        location: [step.start_location.lng(), step.start_location.lat()] as [number, number],
+      })).filter((st: any) => st.distance > 5);
+
+      return {
+        id: `r${i + 1}`,
+        name: NAMES[Math.min(i, 2)],
+        type: TYPES[Math.min(i, 2)],
+        rsi,
+        duration: `${Math.max(1, Math.round((leg.duration?.value ?? 0) / 60))} min`,
+        distance: `${((leg.distance?.value ?? 0) / 1000).toFixed(1)} km`,
+        color: COLOR[Math.min(i, 2)],
+        reasons,
+        coordinates: coords,
+        steps,
+        checkpoints: generateCheckpoints(coords, policeStations),
+      };
+    });
+  } catch (gmErr) {
+    console.warn("[GoogleDirs] Falling back to OSRM:", gmErr);
+    return fetchRealRoutes(s, e, incidentData);
+  }
 }
 
 function computeBearing(prev: { lat: number; lng: number }, next: { lat: number; lng: number }) {
@@ -752,40 +942,6 @@ function ShareModal({ origin, destination, onClose }: { origin: string; destinat
         </div>
       </motion.div>
     </div>
-  );
-}
-
-/* ─── Floating Feature Panel ─────────────────────────────────────────────── */
-function FeaturePanel({
-  onEmergency, onReport, onReview, onShare,
-}: {
-  onEmergency: () => void; onReport: () => void; onReview: () => void; onShare: () => void;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.9, y: 10 }}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.9, y: 10 }}
-      className="absolute bottom-16 right-3 z-[500] rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated"
-    >
-      <div className="px-3 pt-2.5 pb-1.5 border-b border-border">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Safety Tools</p>
-      </div>
-      <div className="grid grid-cols-2 gap-1 p-2">
-        {[
-          { label: "Emergency\nAlert",  icon: Siren,         fn: onEmergency, color: "text-red-500 hover:bg-red-500/10" },
-          { label: "Report\nIncident",  icon: AlertTriangle, fn: onReport,    color: "text-amber-500 hover:bg-amber-500/10" },
-          { label: "Share\nLocation",   icon: Share2,        fn: onShare,     color: "text-blue-500 hover:bg-blue-500/10" },
-          { label: "Review\nRoute",     icon: Star,          fn: onReview,    color: "text-purple-500 hover:bg-purple-500/10" },
-        ].map(({ label, icon: Icon, fn, color }) => (
-          <button key={label} onClick={fn}
-            className={`flex flex-col items-center gap-1.5 rounded-xl p-3 text-xs font-medium transition-colors ${color}`}>
-            <Icon className="h-5 w-5" />
-            <span className="text-center leading-tight whitespace-pre-wrap">{label}</span>
-          </button>
-        ))}
-      </div>
-    </motion.div>
   );
 }
 
@@ -1097,29 +1253,21 @@ export default function Dashboard() {
   const [deviationAlert, setDeviationAlert] = useState(false);
   const [proximityAlert, setProximityAlert] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [showDetail, setShowDetail] = useState(false);
+
   const [isSearching, setIsSearching] = useState(false);
-  // Safety mode & modals
-  const [safetyMode, setSafetyMode] = useState(false);
-  const [showFeaturePanel, setShowFeaturePanel] = useState(false);
+  // Modals
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [navMode, setNavMode] = useState(false);
+  const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
   const [userHeading, setUserHeading] = useState(0);
   const lastUserLocRef = useRef<{ lat: number; lng: number } | null>(null);
-
-  const toggleSafetyMode = () => {
-    const next = !safetyMode;
-    setSafetyMode(next);
-    setShowFeaturePanel(next);
-    setShowSafeZones(next);
-    setShowHotspots(next);
-    setShowPolice(true);
-    setShowIncidents(next);
-  };
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
+  const [batteryCharging, setBatteryCharging] = useState(false);
+  const [lowBatteryDismissed, setLowBatteryDismissed] = useState(false);
 
   const { data: overview } = useQuery({
     queryKey: ["map-overview"],
@@ -1148,13 +1296,17 @@ export default function Dashboard() {
   const stationData  = overview?.policeStations || policeStations;
   const userArrowIcon = useMemo(() => makeUserArrowIcon(userHeading), [userHeading]);
 
-  const mapCenter: [number, number] = selectedRoute
-    ? [selectedRoute.coordinates[0][1], selectedRoute.coordinates[0][0]]
-    : userLoc
-    ? [userLoc.lat, userLoc.lng]
-    : originLoc
-    ? [originLoc.lat, originLoc.lng]
-    : [PUNE_CENTER[1], PUNE_CENTER[0]];
+  const mapCenter = useMemo<[number, number]>(() =>
+    selectedRoute
+      ? [selectedRoute.coordinates[0][1], selectedRoute.coordinates[0][0]]
+      : userLoc
+      ? [userLoc.lat, userLoc.lng]
+      : originLoc
+      ? [originLoc.lat, originLoc.lng]
+      : [PUNE_CENTER[1], PUNE_CENTER[0]],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedRoute?.id, userLoc?.lat, userLoc?.lng, originLoc?.lat, originLoc?.lng]
+  );
 
   useEffect(() => {
     if (!("geolocation" in navigator)) return;
@@ -1196,6 +1348,18 @@ export default function Dashboard() {
         }
 
         lastUserLocRef.current = { lat, lng };
+
+        // Auto-tick checkpoints during navigation when user passes within 100m
+        if (navMode && selectedRoute?.checkpoints) {
+          let ticked = false;
+          selectedRoute.checkpoints.forEach((cp) => {
+            if (!cp.passed && haversineKm(lat, lng, cp.lat, cp.lng) < 0.1) {
+              cp.passed = true;
+              ticked = true;
+            }
+          });
+          if (ticked) setSelectedRoute({ ...selectedRoute });
+        }
       },
       () => {
         // Keep app working even if permission denied
@@ -1204,6 +1368,55 @@ export default function Dashboard() {
     );
     return () => navigator.geolocation.clearWatch(watcher);
   }, []);
+
+  /* Battery monitoring */
+  useEffect(() => {
+    let battery: any = null;
+    const update = () => {
+      if (!battery) return;
+      setBatteryLevel(Math.round(battery.level * 100));
+      setBatteryCharging(battery.charging);
+    };
+    (navigator as any).getBattery?.().then((b: any) => {
+      battery = b;
+      update();
+      b.addEventListener("levelchange", update);
+      b.addEventListener("chargingchange", update);
+    }).catch(() => {});
+    return () => {
+      if (battery) {
+        battery.removeEventListener("levelchange", update);
+        battery.removeEventListener("chargingchange", update);
+      }
+    };
+  }, []);
+
+  /* Sync location to backend every 30s for guardian visibility */
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const loc = lastUserLocRef.current;
+      if (!loc) return;
+      updateLocation({
+        lat: loc.lat,
+        lng: loc.lng,
+        accuracy: userLoc?.accuracy,
+        batteryLevel: batteryLevel ?? undefined,
+        isNavigating: navMode,
+        currentRoute: selectedRoute
+          ? {
+              origin: origin || "Current Location",
+              destination: destination || "",
+              rsi: selectedRoute.rsi,
+              eta: selectedRoute.duration,
+              distance: selectedRoute.distance,
+            }
+          : undefined,
+        checkpointsPassed: selectedRoute?.checkpoints?.filter((c) => c.passed).length,
+        checkpointsTotal: selectedRoute?.checkpoints?.length,
+      }).catch(() => {});
+    }, 30000);
+    return () => clearInterval(iv);
+  }, [navMode, selectedRoute, batteryLevel, userLoc]);
 
   /* Real deviation check: if user is > 150m from closest point on the selected route */
   useEffect(() => {
@@ -1242,11 +1455,11 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchRealRoutes(s, e, mapIncidents);
+      const gen = await fetchGoogleMapsRoutes(s, e, mapIncidents);
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setHasSearched(true);
-      setShowDetail(true);
+      setExpandedRouteId(gen[0].id);
       setDeviationAlert(false);
       setProximityAlert(false);
     } finally {
@@ -1256,7 +1469,7 @@ export default function Dashboard() {
 
   const pickRoute = (r: RouteOption) => {
     setSelectedRoute(r);
-    setShowDetail(true);
+    setExpandedRouteId((prev) => (prev === r.id ? null : r.id));
     setDeviationAlert(false);
     setProximityAlert(false);
   };
@@ -1462,6 +1675,27 @@ export default function Dashboard() {
               >
                 <Popup><strong>Destination</strong>: {destination}</Popup>
               </Marker>
+
+              {/* Checkpoint markers on map */}
+              {selectedRoute.checkpoints?.map((cp, cpIdx) => (
+                <Marker
+                  key={`cp-${cpIdx}`}
+                  position={[cp.lat, cp.lng]}
+                  icon={L.divIcon({
+                    className: "",
+                    html: `<div style="width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.3);font-size:10px;font-weight:700;color:white;background:${
+                      cp.passed ? "#22c55e" : cp.type === "police" ? "#3b82f6" : cp.type === "hospital" ? "#f87171" : "#f59e0b"
+                    }">${cpIdx + 1}</div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11],
+                  })}
+                >
+                  <Popup>
+                    <strong>{cp.name}</strong><br />
+                    <span style={{fontSize:11,color:"#888"}}>ETA ~{cp.eta} • {cp.type}</span>
+                  </Popup>
+                </Marker>
+              ))}
             </>
           )}
         </MapContainer>
@@ -1618,97 +1852,123 @@ export default function Dashboard() {
 
             <div className="px-3 py-2 space-y-1.5">
               {routes.map((route, i) => (
-                <motion.button
+                <motion.div
                   key={route.id}
                   initial={{ opacity: 0, x: -8 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.04 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={() => pickRoute(route)}
-                  className={`w-full text-left p-3 rounded-xl border transition-all ${
+                  className={`rounded-xl border transition-all overflow-hidden ${
                     selectedRoute?.id === route.id
                       ? "border-primary bg-primary/5"
                       : "border-transparent bg-muted/40 hover:bg-muted hover:border-border"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: route.color }} />
-                      <span className="font-semibold text-sm leading-tight">{route.name}</span>
+                  {/* Clickable header row */}
+                  <button
+                    onClick={() => pickRoute(route)}
+                    className="w-full text-left p-3"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: route.color }} />
+                        <span className="font-semibold text-sm leading-tight">{route.name}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border shrink-0 ${rsiBg2(route.rsi)}`}>
+                          <span className={rsiColor2(route.rsi)}>RSI {route.rsi}</span>
+                        </span>
+                        <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${
+                          expandedRouteId === route.id ? "rotate-180" : ""
+                        }`} />
+                      </div>
                     </div>
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full border shrink-0 ${rsiBg2(route.rsi)}`}>
-                      <span className={rsiColor2(route.rsi)}>RSI {route.rsi}</span>
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground ml-4">
-                    <span className="flex items-center gap-1"><Navigation className="h-3 w-3" />{route.distance}</span>
-                    <span>{route.duration}</span>
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase"
-                      style={{ background: route.color + "22", color: route.color }}>{route.type}</span>
-                  </div>
-                  <p className="mt-1.5 ml-4 text-[11px] text-muted-foreground truncate">
-                    Why this route: {getRouteSummary(route)[0]}
-                  </p>
-                </motion.button>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground ml-4">
+                      <span className="flex items-center gap-1"><Navigation className="h-3 w-3" />{route.distance}</span>
+                      <span>{route.duration}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase"
+                        style={{ background: route.color + "22", color: route.color }}>{route.type}</span>
+                    </div>
+                    <p className="mt-1.5 ml-4 text-[11px] text-muted-foreground truncate">
+                      {getRouteSummary(route)[0]}
+                    </p>
+                  </button>
+
+                  {/* Inline expandable details */}
+                  <AnimatePresence>
+                    {expandedRouteId === route.id && (
+                      <motion.div
+                        key="inline-detail"
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="overflow-hidden border-t border-border/60"
+                      >
+                        <div className="px-3 py-3 space-y-2.5">
+                          <div className="grid grid-cols-3 gap-2 text-center">
+                            <div className="p-2 rounded-lg bg-background/60 border border-border">
+                              <div className={`text-base font-bold ${rsiColor2(route.rsi)}`}>{route.rsi}</div>
+                              <div className="text-[10px] text-muted-foreground">RSI Score</div>
+                            </div>
+                            <div className="p-2 rounded-lg bg-background/60 border border-border">
+                              <div className="text-sm font-bold">{route.distance}</div>
+                              <div className="text-[10px] text-muted-foreground">Distance</div>
+                            </div>
+                            <div className="p-2 rounded-lg bg-background/60 border border-border">
+                              <div className="text-sm font-bold">{route.duration}</div>
+                              <div className="text-[10px] text-muted-foreground">Est. Time</div>
+                            </div>
+                          </div>
+                          <div className="bg-muted/40 rounded-lg p-2.5 space-y-1">
+                            {getRouteSummary(route).map((reason) => (
+                              <p key={reason} className="text-[11px] text-muted-foreground">• {reason}</p>
+                            ))}
+                          </div>
+
+                          {/* Checkpoints along route */}
+                          {route.checkpoints && route.checkpoints.length > 0 && (
+                            <div className="bg-muted/30 rounded-lg p-2.5 space-y-1.5">
+                              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Safety Checkpoints</p>
+                              <div className="space-y-1">
+                                {route.checkpoints.map((cp, cpIdx) => (
+                                  <div key={cpIdx} className="flex items-center gap-2">
+                                    <div className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${
+                                      cp.passed ? "bg-emerald-500" :
+                                      cp.type === "police" ? "bg-blue-500" :
+                                      cp.type === "hospital" ? "bg-red-400" : "bg-amber-400"
+                                    }`} />
+                                    <span className="text-[11px] font-medium truncate flex-1">{cp.name}</span>
+                                    <span className="text-[10px] text-muted-foreground flex-shrink-0">~{cp.eta}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <Button
+                            className="w-full rounded-xl h-8 text-xs"
+                            onClick={() => { pickRoute(route); setNavMode(true); }}
+                          >
+                            <Navigation className="h-3.5 w-3.5 mr-1.5" /> Start Navigation
+                          </Button>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            <Button variant="outline" className="rounded-xl h-7 text-xs" onClick={() => { setSelectedRoute(route); setShowReviewModal(true); }}>
+                              <Star className="h-3 w-3 mr-1" /> Review
+                            </Button>
+                            <Button variant="outline" className="rounded-xl h-7 text-xs" onClick={() => { setSelectedRoute(route); setShowShareModal(true); }}>
+                              <Share2 className="h-3 w-3 mr-1" /> Share
+                            </Button>
+                            <Button variant="outline" className="rounded-xl h-7 text-xs text-red-500 hover:text-red-500" onClick={() => setShowEmergencyModal(true)}>
+                              <Siren className="h-3 w-3 mr-1" /> SOS
+                            </Button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
               ))}
             </div>
-
-            {/* Expandable route detail */}
-            <AnimatePresence>
-              {selectedRoute && showDetail && (
-                <motion.div
-                  key="detail"
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: "auto", opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="border-t border-border overflow-hidden"
-                >
-                  <div className="px-4 py-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        Route Details
-                      </p>
-                      <button onClick={() => setShowDetail(false)} className="text-muted-foreground hover:text-foreground">
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div className="p-2 rounded-lg bg-muted/60 border border-border">
-                        <div className={`text-base font-bold ${rsiColor2(selectedRoute.rsi)}`}>{selectedRoute.rsi}</div>
-                        <div className="text-[10px] text-muted-foreground">RSI</div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-muted/60 border border-border">
-                        <div className="text-base font-bold">{selectedRoute.distance}</div>
-                        <div className="text-[10px] text-muted-foreground">Distance</div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-muted/60 border border-border">
-                        <div className="text-base font-bold">{selectedRoute.duration}</div>
-                        <div className="text-[10px] text-muted-foreground">Time</div>
-                      </div>
-                    </div>
-                    <div className="text-xs text-muted-foreground bg-muted/40 rounded-lg p-2.5 space-y-1">
-                      {getRouteSummary(selectedRoute).map((reason) => (
-                        <p key={reason}>• {reason}</p>
-                      ))}
-                    </div>
-                    <Button className="w-full rounded-xl h-8 text-xs" onClick={() => { if (selectedRoute) setNavMode(true); }}>
-                      <Navigation className="h-3.5 w-3.5 mr-1.5" /> Start Navigation
-                    </Button>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <Button variant="outline" className="rounded-xl h-7 text-xs" onClick={() => setShowReviewModal(true)}>
-                        <Star className="h-3 w-3 mr-1" /> Review
-                      </Button>
-                      <Button variant="outline" className="rounded-xl h-7 text-xs" onClick={() => setShowShareModal(true)}>
-                        <Share2 className="h-3 w-3 mr-1" /> Share
-                      </Button>
-                      <Button variant="outline" className="rounded-xl h-7 text-xs text-red-500 hover:text-red-500" onClick={() => setShowEmergencyModal(true)}>
-                        <Siren className="h-3 w-3 mr-1" /> SOS
-                      </Button>
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </motion.div>
           )}
         </div>}
@@ -1724,24 +1984,87 @@ export default function Dashboard() {
           </button>
         )}
 
-        {/*
-        {/* Safety Mode toggle button (top-right) */}
-        <div className="absolute top-2 right-2 md:top-3 md:right-3 z-[500]">
-          <button
-            onClick={toggleSafetyMode}
-            className={`flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl text-xs md:text-sm font-semibold shadow-elevated transition-all ${
-              safetyMode
-                ? "bg-emerald-500 text-white hover:bg-emerald-600"
-                : "bg-card/95 backdrop-blur-xl border border-border text-foreground hover:bg-muted"
-            }`}
-          >
-            <ShieldCheck className="h-3.5 w-3.5 md:h-4 md:w-4" />
-            <span className="hidden sm:inline">{safetyMode ? "🚺 Safety Mode ON" : "Activate Safety Mode"}</span>
-            <span className="sm:hidden">{safetyMode ? "ON" : "Safety"}</span>
-          </button>
-        </div>
+        {/* ── Area RSI Panel (right side) ───────────────────────────────── */}
+        {!navMode && userLoc && (() => {
+          // Compute dynamic area RSI from nearby incidents, hotspots, safe zones
+          const nearIncidents = mapIncidents.filter((inc) => haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 2);
+          const nearHotspots  = crimeHotspots.filter((h) => haversineKm(userLoc.lat, userLoc.lng, h.lat, h.lng) < 2);
+          const nearSafe      = safeZones.filter((z) => haversineKm(userLoc.lat, userLoc.lng, z.lat, z.lng) < 2);
+          const nearPolice    = stationData.filter((ps) => haversineKm(userLoc.lat, userLoc.lng, ps.lat, ps.lng) < 2);
 
-        {/* Deviation/proximity alerts (below safety mode toggle) */}
+          const incidentPenalty = nearIncidents.reduce((s, inc) => s + (inc.severity || 1) * 2, 0);
+          const hotspotPenalty  = nearHotspots.reduce((s, h) => s + h.danger / 25, 0);
+          const safeBonus       = nearSafe.length * 3 + nearPolice.length * 4;
+          const rawScore        = Math.max(10, Math.min(100, 75 - incidentPenalty - hotspotPenalty + safeBonus));
+          const areaRsi         = Math.round(rawScore);
+
+          const areaName = (() => {
+            // Try to get a meaningful name from the nearest known location
+            const nearest = demoLocations.reduce<{ loc: DemoLocation; dist: number } | null>((best, loc) => {
+              const d = haversineKm(userLoc.lat, userLoc.lng, loc.lat, loc.lng);
+              if (!best || d < best.dist) return { loc, dist: d };
+              return best;
+            }, null);
+            return nearest && nearest.dist < 3 ? nearest.loc.name : `${userLoc.lat.toFixed(4)}°N`;
+          })();
+
+          return (
+            <motion.div
+              initial={{ opacity: 0, x: 16 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="absolute bottom-20 md:bottom-4 right-2 md:right-3 z-[490] w-48 md:w-52 rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated"
+            >
+              <div className="px-2.5 pt-2 pb-1 border-b border-border">
+                <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">Your Area</p>
+              </div>
+              <div className="px-2.5 py-2 space-y-2">
+                {/* Area name + RSI */}
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold truncate">{areaName}</p>
+                    <p className="text-[10px] text-muted-foreground">Live safety score</p>
+                  </div>
+                  <div className={`px-2.5 py-1.5 rounded-xl border text-center ${rsiBg2(areaRsi)}`}>
+                    <div className={`text-lg font-bold leading-none ${rsiColor2(areaRsi)}`}>{areaRsi}</div>
+                    <div className="text-[9px] text-muted-foreground mt-0.5">RSI</div>
+                  </div>
+                </div>
+
+                {/* Stats grid */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  <div className="p-1.5 rounded-lg bg-muted/50 text-center">
+                    <div className="text-xs font-bold">{nearIncidents.length}</div>
+                    <div className="text-[9px] text-muted-foreground">Incidents</div>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-muted/50 text-center">
+                    <div className="text-xs font-bold">{nearPolice.length}</div>
+                    <div className="text-[9px] text-muted-foreground">Police Stn</div>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-muted/50 text-center">
+                    <div className="text-xs font-bold">{nearSafe.length}</div>
+                    <div className="text-[9px] text-muted-foreground">Safe Zones</div>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-muted/50 text-center">
+                    <div className="text-xs font-bold text-red-500">{nearHotspots.length}</div>
+                    <div className="text-[9px] text-muted-foreground">Hotspots</div>
+                  </div>
+                </div>
+
+                {/* Quick status */}
+                <div className={`flex items-center gap-1.5 text-[11px] font-medium px-2 py-1.5 rounded-lg ${
+                  areaRsi >= 70 ? "bg-emerald-500/10 text-emerald-600" : areaRsi >= 50 ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"
+                }`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${areaRsi >= 70 ? "bg-emerald-500" : areaRsi >= 50 ? "bg-amber-500" : "bg-red-500"} animate-pulse`} />
+                  {areaRsi >= 70 ? "Generally safe area" : areaRsi >= 50 ? "Exercise caution" : "High-risk area — stay alert"}
+                </div>
+              </div>
+            </motion.div>
+          );
+        })()}
+
+
+
+        {/* Deviation/proximity alerts */}
         <AnimatePresence>
           {deviationAlert && (
             <motion.div key="dev"
@@ -1778,7 +2101,35 @@ export default function Dashboard() {
           )}
         </AnimatePresence>
 
-        {/* â”€â”€ Legend bottom-left â”€â”€ */}
+        {/* Low battery alert */}
+        <AnimatePresence>
+          {batteryLevel !== null && batteryLevel <= 20 && !batteryCharging && !lowBatteryDismissed && (
+            <motion.div key="bat"
+              initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 16 }}
+              className="absolute bottom-28 md:bottom-14 right-3 z-[500] w-64 p-3 rounded-2xl bg-orange-500/10 border border-orange-500/30 shadow-elevated backdrop-blur-md"
+            >
+              <div className="flex items-start gap-2.5">
+                <BatteryLow className="h-5 w-5 text-orange-500 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold text-xs">Low Battery — {batteryLevel}%</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {batteryLevel <= 10
+                      ? "Critical! Location sharing may stop soon. Charge your phone."
+                      : "Consider charging soon to keep safety features active."}
+                  </p>
+                  <div className="flex gap-2 mt-2">
+                    <Button size="sm" variant="outline" className="text-[10px] h-6 rounded-full px-2.5" onClick={() => setLowBatteryDismissed(true)}>Dismiss</Button>
+                    {batteryLevel <= 10 && userLoc && (
+                      <Button size="sm" className="text-[10px] h-6 rounded-full px-2.5 bg-red-500 hover:bg-red-600 text-white"
+                        onClick={() => setShowEmergencyModal(true)}>Send SOS</Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Legend bottom-left */}
         <div className="absolute bottom-20 md:bottom-4 left-2 md:left-3 z-[500] flex flex-wrap items-center gap-2 md:gap-3 px-2 md:px-3 py-1 md:py-1.5 rounded-xl bg-card/90 backdrop-blur-md border border-border shadow-soft text-[10px] md:text-xs text-muted-foreground max-w-[260px] md:max-w-xs">
           <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-blue-500" />Police</span>
@@ -1790,17 +2141,7 @@ export default function Dashboard() {
           {showHotspots && <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full border-2 border-red-400 bg-red-400/20" />Hotspot</span>}
         </div>
 
-        {/* Feature panel floating bottom-right */}
-        <AnimatePresence>
-          {showFeaturePanel && (
-            <FeaturePanel
-              onEmergency={() => setShowEmergencyModal(true)}
-              onReport={() => setShowReportModal(true)}
-              onReview={() => setShowReviewModal(true)}
-              onShare={() => setShowShareModal(true)}
-            />
-          )}
-        </AnimatePresence>
+
 
         <SOSButton />
 
@@ -1815,6 +2156,9 @@ export default function Dashboard() {
             <ShareModal origin={origin} destination={destination} onClose={() => setShowShareModal(false)} />
           )}
         </AnimatePresence>
+
+        {/* AI Safety Assistant chatbot */}
+        <AISafetyAssistant />
       </div>
     </div>
   );

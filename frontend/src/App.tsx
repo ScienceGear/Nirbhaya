@@ -17,13 +17,14 @@ import Report from "@/pages/Report";
 import Police from "@/pages/Police";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/NotFound";
+import GuardianDashboard from "@/pages/GuardianDashboard";
 
 const queryClient = new QueryClient();
 
 // Hide the top navbar on full-screen map pages
 function AppShell() {
   const { pathname } = useLocation();
-  const hideTopNav = ["/dashboard", "/sos", "/report", "/police", "/settings"].some(
+  const hideTopNav = ["/dashboard", "/sos", "/report", "/police", "/settings", "/guardian"].some(
     (route) => pathname === route || pathname.startsWith(`${route}/`)
   );
   return (
@@ -39,6 +40,7 @@ function AppShell() {
         <Route path="/report" element={<Report />} />
         <Route path="/police" element={<Police />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/guardian" element={<GuardianDashboard />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </>

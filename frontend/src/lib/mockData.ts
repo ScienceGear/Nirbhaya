@@ -7,7 +7,7 @@ export interface PoliceStation {
   phone: string;
   lat: number;
   lng: number;
-  jurisdiction: string;
+  jurisdiction?: string;
   distance?: string;
 }
 
@@ -26,6 +26,15 @@ export interface Incident {
   pointsAwarded?: number;
 }
 
+export interface RouteCheckpoint {
+  name: string;
+  type: "police" | "hospital" | "commercial" | "landmark";
+  lat: number;
+  lng: number;
+  eta: string;       // estimated time to reach, e.g. "3 min"
+  passed: boolean;   // whether user has passed this checkpoint
+}
+
 export interface RouteOption {
   id: string;
   name: string;
@@ -37,6 +46,7 @@ export interface RouteOption {
   coordinates: [number, number][];
   reasons?: string[];
   steps?: Array<{ instruction: string; distance: number; duration: number; location: [number, number] }>;
+  checkpoints?: RouteCheckpoint[];
 }
 
 export interface TrustedContact {
@@ -233,19 +243,6 @@ export const crimeHotspots: CrimeHotspot[] = [
   { lat: 18.4800, lng: 73.8800, name: "Old Pune Area – Narrow Lanes", danger: 95, incidents: 30, issues: ["Narrow lanes", "Old buildings", "Poor lighting"] },
   { lat: 18.5150, lng: 73.9050, name: "Deserted Stretch – Wadgaon", danger: 75, incidents: 10, issues: ["No CCTV", "Deserted at night", "Far from police"] },
   { lat: 18.5700, lng: 73.8600, name: "Dark Road – Dhanori", danger: 80, incidents: 14, issues: ["Broken streetlights", "No pedestrian path", "Night crimes reported"] },
-];
-
-export const heatmapData = [
-  { lat: 18.5250, lng: 73.8500, weight: 0.8 },
-  { lat: 18.5100, lng: 73.8700, weight: 0.9 },
-  { lat: 18.5350, lng: 73.8300, weight: 0.6 },
-  { lat: 18.5200, lng: 73.8900, weight: 0.7 },
-  { lat: 18.5000, lng: 73.8400, weight: 0.95 },
-  { lat: 18.5280, lng: 73.8550, weight: 0.5 },
-  { lat: 18.5150, lng: 73.8150, weight: 0.65 },
-  { lat: 18.5400, lng: 73.8800, weight: 0.85 },
-  { lat: 18.5180, lng: 73.8620, weight: 0.4 },
-  { lat: 18.5320, lng: 73.8380, weight: 0.55 },
 ];
 
 export const incidentTypes = [

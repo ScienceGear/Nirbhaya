@@ -1,53 +1,148 @@
-import { useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Sun, Moon, Globe, Bell, Shield, User } from "lucide-react";
+import { Sun, Moon, Globe, Bell, Shield, User, Trophy, Camera, Users, Copy, Check, Eye, MapPin, Navigation, AlertTriangle, BatteryMedium, Activity, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useTheme } from "@/lib/theme";
 import { useI18n, type Lang } from "@/lib/i18n";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type SharingPrefs } from "@/lib/auth";
+import { useQuery } from "@tanstack/react-query";
+import { getUserPoints, updateSharingPrefs } from "@/lib/api";
 import DashboardNav from "@/components/DashboardNav";
 
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
   const { lang, setLang, t } = useI18n();
   const { user } = useAuth();
+  const reporterId = user?.email || "guest";
+
   const [notifications, setNotifications] = useState(true);
   const [proximityAlerts, setProximityAlerts] = useState(true);
   const [voiceSOS, setVoiceSOS] = useState(false);
+  const [batteryAlerts, setBatteryAlerts] = useState(true);
+  const [pfp, setPfp] = useState<string>(() => localStorage.getItem("nirbhaya_pfp") || "");
+  const pfpRef = useRef<HTMLInputElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Sharing preferences (synced with backend)
+  const defaultPrefs: SharingPrefs = { location: true, routeInfo: true, sosAlerts: true, batteryLevel: true, checkpoints: true, incidentReports: false };
+  const [sharingPrefs, setSharingPrefs] = useState<SharingPrefs>(user?.sharingPrefs || defaultPrefs);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+
+  useEffect(() => {
+    if (user?.sharingPrefs) setSharingPrefs(user.sharingPrefs);
+  }, [user?.sharingPrefs]);
+
+  const togglePref = async (key: keyof SharingPrefs) => {
+    const updated = { ...sharingPrefs, [key]: !sharingPrefs[key] };
+    setSharingPrefs(updated);
+    setSavingPrefs(true);
+    try {
+      await updateSharingPrefs(updated);
+    } catch { /* offline fallback */ }
+    setSavingPrefs(false);
+  };
+
+  const copyLinkCode = () => {
+    if (user?.linkCode) {
+      navigator.clipboard.writeText(user.linkCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const { data: pointsData } = useQuery({
+    queryKey: ["user-points", reporterId],
+    queryFn: () => getUserPoints(reporterId),
+  });
+
+  const handlePfpChange = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = typeof reader.result === "string" ? reader.result : "";
+      setPfp(url);
+      localStorage.setItem("nirbhaya_pfp", url);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const totalPoints = pointsData?.totalPoints || 0;
+  const tier = totalPoints >= 500 ? "Gold" : totalPoints >= 200 ? "Silver" : "Bronze";
+  const tierColor = tier === "Gold" ? "text-amber-500" : tier === "Silver" ? "text-slate-400" : "text-orange-400";
 
   return (
     <div className="min-h-[100dvh] flex bg-background">
       <DashboardNav />
-      <main className="flex-1 overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-24 md:pb-10">
-      <div className="container mx-auto max-w-xl space-y-6">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center">
-          <h1 className="font-display text-3xl font-bold mb-2">{t("nav.settings")}</h1>
+      <main className="flex-1 overflow-y-auto px-3 md:px-6 pt-4 pb-24 md:pb-10">
+      <div className="container mx-auto max-w-xl space-y-5">
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="text-center">
+          <h1 className="font-display text-2xl font-bold">{t("nav.settings")}</h1>
         </motion.div>
 
+        {/* Profile card */}
         {user && (
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft flex items-center gap-4">
-            <div className="h-14 w-14 rounded-full bg-primary/10 flex items-center justify-center">
-              <User className="h-7 w-7 text-primary" />
+            {/* Avatar */}
+            <div className="relative shrink-0">
+              <div className="h-16 w-16 rounded-full bg-primary/10 overflow-hidden flex items-center justify-center">
+                {pfp ? (
+                  <img src={pfp} alt="Profile" className="h-full w-full object-cover" />
+                ) : (
+                  <User className="h-8 w-8 text-primary" />
+                )}
+              </div>
+              <button
+                onClick={() => pfpRef.current?.click()}
+                className="absolute -bottom-1 -right-1 h-6 w-6 rounded-full bg-primary flex items-center justify-center shadow"
+              >
+                <Camera className="h-3 w-3 text-white" />
+              </button>
+              <input
+                ref={pfpRef}
+                type="file"
+                accept="image/*"
+                capture="user"
+                className="hidden"
+                onChange={(e) => handlePfpChange(e.target.files?.[0])}
+              />
             </div>
-            <div>
-              <h3 className="font-display font-semibold">{user.name}</h3>
-              <p className="text-sm text-muted-foreground">{user.email}</p>
+            <div className="flex-1 min-w-0">
+              <h3 className="font-semibold truncate">{user.name}</h3>
+              <p className="text-xs text-muted-foreground truncate">{user.email}</p>
+              <span className="inline-block mt-1 text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {(user as any).role === "guardian" ? "Guardian" : "User"}
+              </span>
             </div>
           </div>
         )}
 
-        <div className="space-y-4">
+        {/* Community points */}
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-500/10 to-orange-500/5 border border-amber-500/20 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Trophy className="h-6 w-6 text-amber-500 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold">Community Points</p>
+              <p className="text-xs text-muted-foreground">Earn by reporting incidents & rating areas</p>
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <p className={`text-xl font-bold ${tierColor}`}>{totalPoints}</p>
+            <p className={`text-[11px] font-semibold ${tierColor}`}>{tier} Tier</p>
+          </div>
+        </div>
+
+        <div className="space-y-3">
           {/* Theme */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                {theme === "dark" ? <Moon className="h-5 w-5 text-primary" /> : <Sun className="h-5 w-5 text-primary" />}
+                {theme === "dark" ? <Moon className="h-4 w-4 text-primary" /> : <Sun className="h-4 w-4 text-primary" />}
                 <div>
                   <p className="font-medium text-sm">{t("settings.theme")}</p>
-                  <p className="text-xs text-muted-foreground">{theme === "dark" ? "Dark Mode" : "Light Mode"}</p>
+                  <p className="text-xs text-muted-foreground">{theme === "dark" ? "Dark mode on" : "Light mode on"}</p>
                 </div>
               </div>
               <Switch checked={theme === "dark"} onCheckedChange={toggle} />
@@ -58,14 +153,14 @@ export default function SettingsPage() {
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <Globe className="h-5 w-5 text-primary" />
+                <Globe className="h-4 w-4 text-primary" />
                 <div>
                   <p className="font-medium text-sm">{t("settings.language")}</p>
-                  <p className="text-xs text-muted-foreground">Choose your preferred language</p>
+                  <p className="text-xs text-muted-foreground">Choose your language</p>
                 </div>
               </div>
               <Select value={lang} onValueChange={(v) => setLang(v as Lang)}>
-                <SelectTrigger className="w-32 rounded-xl">
+                <SelectTrigger className="w-28 rounded-xl text-xs h-8">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -78,34 +173,90 @@ export default function SettingsPage() {
           </div>
 
           {/* Notifications */}
-          <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-4">
+          <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-3">
             <div className="flex items-center gap-3">
-              <Bell className="h-5 w-5 text-primary" />
-              <p className="font-medium text-sm">Notifications</p>
+              <Bell className="h-4 w-4 text-primary" />
+              <p className="font-medium text-sm">Notifications & Alerts</p>
             </div>
-            <div className="space-y-3 pl-8">
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Push Notifications</Label>
-                <Switch checked={notifications} onCheckedChange={setNotifications} />
+            <div className="space-y-3 pl-7">
+              {([
+                { label: "Push Notifications", state: notifications, set: setNotifications },
+                { label: "Proximity Alerts", state: proximityAlerts, set: setProximityAlerts },
+                { label: "Voice SOS Always-on", state: voiceSOS, set: setVoiceSOS },
+                { label: "Low Battery Alert", state: batteryAlerts, set: setBatteryAlerts },
+              ] as const).map(({ label, state, set }) => (
+                <div key={label} className="flex items-center justify-between">
+                  <Label className="text-sm text-muted-foreground">{label}</Label>
+                  <Switch checked={state} onCheckedChange={set as any} />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Guardian Link Code */}
+          {user && (
+            <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
+              <div className="flex items-center gap-3 mb-2">
+                <Users className="h-4 w-4 text-primary" />
+                <div>
+                  <p className="font-medium text-sm">Guardian Linking</p>
+                  <p className="text-xs text-muted-foreground">Share this code with your guardian to link accounts</p>
+                </div>
               </div>
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Proximity Alerts</Label>
-                <Switch checked={proximityAlerts} onCheckedChange={setProximityAlerts} />
+              {user.linkCode && (
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-muted/50 mt-2">
+                  <span className="font-mono text-lg font-bold tracking-[0.3em]">{user.linkCode}</span>
+                  <button onClick={copyLinkCode} className="ml-auto text-muted-foreground hover:text-foreground transition-colors">
+                    {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+                  </button>
+                </div>
+              )}
+              {(user.myGuardians?.length ?? 0) > 0 && (
+                <p className="mt-2 text-[11px] text-emerald-500 pl-1">{user.myGuardians!.length} guardian(s) linked</p>
+              )}
+            </div>
+          )}
+
+          {/* Data Sharing Preferences */}
+          <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-3">
+            <div className="flex items-center gap-3">
+              <Eye className="h-4 w-4 text-primary" />
+              <div>
+                <p className="font-medium text-sm">Data Sharing with Guardians</p>
+                <p className="text-xs text-muted-foreground">Control what your guardians can see</p>
               </div>
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Voice SOS Always-on</Label>
-                <Switch checked={voiceSOS} onCheckedChange={setVoiceSOS} />
-              </div>
+              {savingPrefs && <span className="ml-auto text-[10px] text-muted-foreground animate-pulse">Saving…</span>}
+            </div>
+            <div className="space-y-3 pl-7">
+              {([
+                { key: "location" as const, label: "Live Location", icon: MapPin, desc: "Your real-time GPS position" },
+                { key: "routeInfo" as const, label: "Route Info", icon: Navigation, desc: "Current navigation route & RSI" },
+                { key: "sosAlerts" as const, label: "SOS Alerts", icon: AlertTriangle, desc: "Emergency SOS events" },
+                { key: "batteryLevel" as const, label: "Battery Level", icon: BatteryMedium, desc: "Phone battery percentage" },
+                { key: "checkpoints" as const, label: "Checkpoints", icon: Activity, desc: "Route checkpoint progress" },
+                { key: "incidentReports" as const, label: "Incident Reports", icon: FileText, desc: "Reports you have filed" },
+              ]).map(({ key, label, icon: Icon, desc }) => (
+                <div key={key} className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+                    <div>
+                      <Label className="text-sm">{label}</Label>
+                      <p className="text-[10px] text-muted-foreground">{desc}</p>
+                    </div>
+                  </div>
+                  <Switch checked={sharingPrefs[key]} onCheckedChange={() => togglePref(key)} />
+                </div>
+              ))}
             </div>
           </div>
 
           {/* About */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center gap-3">
-              <Shield className="h-5 w-5 text-primary" />
+              <Shield className="h-4 w-4 text-primary" />
               <div>
                 <p className="font-medium text-sm">Nirbhaya v1.0</p>
-                <p className="text-xs text-muted-foreground">WS002 Hackathon • Team Hustlecult 3.0</p>
+                <p className="text-xs text-muted-foreground">WS002 Hackathon · Team Hustlecult 3.0</p>
               </div>
             </div>
           </div>

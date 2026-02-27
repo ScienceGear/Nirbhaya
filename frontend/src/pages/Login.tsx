@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Mail, Lock, User, Eye, EyeOff, Sparkles } from "lucide-react";
+import { Mail, Lock, User, Eye, EyeOff, Sparkles, Shield, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type UserRole } from "@/lib/auth";
 
 export default function LoginPage() {
   const [isSignup, setIsSignup] = useState(false);
@@ -16,12 +16,14 @@ export default function LoginPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
+  const [role, setRole] = useState<UserRole>("user");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const { login, signup } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (isSignup && name.trim().length < 2) {
@@ -45,17 +47,32 @@ export default function LoginPage() {
     }
 
     setError("");
+    setSubmitting(true);
 
-    if (isSignup) signup(name.trim(), email.trim(), password);
-    else login(email.trim(), password);
+    try {
+      const err = isSignup
+        ? await signup(name.trim(), email.trim(), password, role)
+        : await login(email.trim(), password, role);
 
-    navigate("/dashboard");
+      if (err) {
+        setError(err);
+      } else {
+        navigate(role === "guardian" ? "/guardian" : "/dashboard");
+      }
+    } catch {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleGoogleContinue = () => {
+  const handleGoogleContinue = async () => {
     setError("");
-    login("guest@gmail.com", "google-oauth");
-    navigate("/dashboard");
+    setSubmitting(true);
+    const err = await login("priya@nirbhaya.app", "demo123", role);
+    if (err) { setError(err); setSubmitting(false); return; }
+    setSubmitting(false);
+    navigate(role === "guardian" ? "/guardian" : "/dashboard");
   };
 
   return (
@@ -84,9 +101,9 @@ export default function LoginPage() {
             </p>
 
             <div className="mt-5">
-              <Button type="button" variant="outline" className="h-10 w-full rounded-full" onClick={handleGoogleContinue}>
-                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border text-xs font-bold">G</span>
-                Continue with Google
+              <Button type="button" variant="outline" className="h-10 w-full rounded-full" onClick={handleGoogleContinue} disabled={submitting}>
+                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border text-xs font-bold">D</span>
+                Quick Demo Login
               </Button>
 
               <div className="my-3 flex items-center gap-3 text-xs text-muted-foreground">
@@ -97,6 +114,35 @@ export default function LoginPage() {
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-3">
+              {/* Role selector */}
+              <div className="space-y-1.5">
+                <Label>I am a</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRole("user")}
+                    className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
+                      role === "user"
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border bg-muted/40 text-muted-foreground hover:border-primary/40"
+                    }`}
+                  >
+                    <Shield className="h-4 w-4" /> User
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRole("guardian")}
+                    className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
+                      role === "guardian"
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border bg-muted/40 text-muted-foreground hover:border-primary/40"
+                    }`}
+                  >
+                    <Users className="h-4 w-4" /> Guardian
+                  </button>
+                </div>
+              </div>
+
               {isSignup && (
                 <div className="space-y-1.5">
                   <Label htmlFor="name">Full name</Label>
@@ -141,8 +187,8 @@ export default function LoginPage() {
 
               {error && <p className="text-xs text-destructive">{error}</p>}
 
-              <Button type="submit" className="h-10 w-full rounded-full">
-                {isSignup ? "Create account" : "Continue with email"}
+              <Button type="submit" className="h-10 w-full rounded-full" disabled={submitting}>
+                {submitting ? "Please wait…" : isSignup ? "Create account" : "Continue with email"}
               </Button>
             </form>
 

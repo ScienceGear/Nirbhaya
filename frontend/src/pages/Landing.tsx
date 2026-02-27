@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Shield, MapPin, Phone, Brain, Users, ArrowRight, Sparkles } from "lucide-react";
+import { MapPin, Phone, Brain, Users, ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const features = [
