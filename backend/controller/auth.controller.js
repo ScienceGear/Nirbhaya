@@ -1,7 +1,6 @@
 
 import { generateToken } from "../library/utills.js"
 import User from "../model/user.model.js"
-import fs from "node:fs"
 import bcrypt, { genSalt } from "bcrypt"
 
 export const signup = async (req,res)=>{
@@ -25,9 +24,9 @@ export const signup = async (req,res)=>{
         if(newUser){
             const token = await generateToken({userId:newUser._id},res);
             await newUser.save();
-            return await res.status(201).json({message:"signup successful",username:username,email:email,password:encryptedPassword,token})
+            return res.status(201).json({message:"signup successful",username:username,email:email,token})
         }else{
-            return await res.status(400).json({message:"Invalid user details"})
+            return res.status(400).json({message:"Invalid user details"})
         }
     }catch(err){
         console.log(`Error in signup ${err}`)
@@ -47,7 +46,15 @@ export const login = async (req,res)=>{
     const match = await bcrypt.compare(password,user.password)
     if(match){
         const token = await generateToken({userId : user._id},res)
-        return res.status(200).json({message:"login successful",user,token:token})
+        const safeUser = {
+            _id: user._id,
+            username: user.username,
+            email: user.email,
+            createdAt: user.createdAt,
+            emergencyContacts: user.emergencyContacts,
+            emergencyLogs: user.emergencyLogs
+        };
+        return res.status(200).json({message:"login successful",user: safeUser,token:token})
     }else{
         return res.status(401).json({message:"Invalid Password"})
     }
@@ -62,9 +69,9 @@ export const login = async (req,res)=>{
 
 export const logout = (req,res)=>{
   try{
-   res.cookie("jwt"," ",{
-    maxAge:1,
-   })
+    res.clearCookie("jwt", {
+     path: "/"
+    });
    res.status(200).json({message:"Logout successful"})
   }catch(err){
      console.log(`Error in logout controller : ${err}`)

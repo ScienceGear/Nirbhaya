@@ -5,6 +5,15 @@ export const createReport = async (req, res) => {
     let { description, lat, lng, severity } = req.body;
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return res.status(400).json({ error: "Valid latitude and longitude are required" });
+    }
+
+    if (!["Low", "Medium", "High"].includes(severity)) {
+      severity = "Low";
+    }
+
     const report = new Report({
       userID: req.user._id,
       description,
@@ -12,7 +21,7 @@ export const createReport = async (req, res) => {
       longitude,
       severity
     });
-    console.log(latitude, longitude, severity);
+
     await report.save();
     await updateHex(latitude, longitude, severity=== "Low" ? 1 : severity === "Medium" ? 3 : 5);
     res.status(201).json(report);

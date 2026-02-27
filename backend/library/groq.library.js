@@ -4,9 +4,14 @@ dotenv.config();
 
 import Groq from "groq-sdk";
 
-const groq = new Groq({ apiKey: process.env.AI_API_KEY});
+const groqApiKey = process.env.AI_API_KEY || process.env.GROQ_API_KEY;
+const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : null;
 
 export async function getSafeWaypoint(start, end) {
+    if (!groq) {
+        return [];
+    }
+
     const prompt = `
 You are a smart routing assistant that generates safe waypoints for travel. 
 Given a starting location and an ending location, your task is to generate coordinates 
@@ -61,6 +66,6 @@ End: ${JSON.stringify(end)}
         }
     } catch (err) {
         console.error("Error generating safe waypoints:", err);
-        return null;
+        return [];
     }
 }

@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useTheme } from "@/lib/theme";
 import { useI18n, type Lang } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth";
+import DashboardNav from "@/components/DashboardNav";
 
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
@@ -18,7 +19,9 @@ export default function SettingsPage() {
   const [voiceSOS, setVoiceSOS] = useState(false);
 
   return (
-    <div className="min-h-screen pt-20 pb-10 px-4">
+    <div className="min-h-[100dvh] flex bg-background">
+      <DashboardNav />
+      <main className="flex-1 overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-24 md:pb-10">
       <div className="container mx-auto max-w-xl space-y-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center">
           <h1 className="font-display text-3xl font-bold mb-2">{t("nav.settings")}</h1>
@@ -108,6 +111,7 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+      </main>
     </div>
   );
 }

@@ -31,6 +31,7 @@ export interface RouteOption {
   distance: string;
   color: string;
   coordinates: [number, number][];
+  reasons?: string[];
 }
 
 export interface TrustedContact {
@@ -40,8 +41,71 @@ export interface TrustedContact {
   relation: string;
 }
 
+export interface DemoLocation {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
 // Pune, India mock data
 export const PUNE_CENTER: [number, number] = [73.8567, 18.5204];
+
+export const demoLocations: DemoLocation[] = [
+  { name: "Pune Station", lat: 18.5286, lng: 73.8746 },
+  { name: "FC Road", lat: 18.5206, lng: 73.8410 },
+  { name: "Shivajinagar", lat: 18.5308, lng: 73.8475 },
+  { name: "Deccan Gymkhana", lat: 18.5179, lng: 73.8417 },
+  { name: "Swargate", lat: 18.5018, lng: 73.8636 },
+  { name: "Kothrud", lat: 18.5074, lng: 73.8077 },
+  { name: "Hadapsar", lat: 18.5089, lng: 73.9260 },
+  { name: "Koregaon Park", lat: 18.5362, lng: 73.8930 },
+  { name: "Viman Nagar", lat: 18.5679, lng: 73.9143 },
+  { name: "Aundh", lat: 18.5590, lng: 73.8077 },
+  { name: "Lonavala", lat: 18.7546, lng: 73.4062 },
+  { name: "Baner", lat: 18.5591, lng: 73.7868 },
+  { name: "Wakad", lat: 18.5987, lng: 73.7601 },
+  { name: "Hinjewadi", lat: 18.5912, lng: 73.7389 },
+  { name: "Pimpri", lat: 18.6230, lng: 73.7998 },
+  { name: "Chinchwad", lat: 18.6440, lng: 73.7969 },
+  { name: "Vishrantwadi", lat: 18.5833, lng: 73.9005 },
+  { name: "Yerawada", lat: 18.5509, lng: 73.8954 },
+  { name: "Kalyani Nagar", lat: 18.5494, lng: 73.9044 },
+  { name: "Wanowrie", lat: 18.4883, lng: 73.8926 },
+  { name: "Katraj", lat: 18.4531, lng: 73.8626 },
+  { name: "Bibwewadi", lat: 18.4786, lng: 73.8647 },
+  { name: "Saswad", lat: 18.3450, lng: 74.0170 },
+  { name: "Pimpale Saudagar", lat: 18.6020, lng: 73.7999 },
+  { name: "Balewadi", lat: 18.5657, lng: 73.7794 },
+  { name: "Sus Road", lat: 18.5433, lng: 73.7632 },
+  { name: "Magarpatta City", lat: 18.5130, lng: 73.9293 },
+  { name: "Camp Area", lat: 18.5112, lng: 73.8882 },
+  { name: "MG Road Pune", lat: 18.5204, lng: 73.8567 },
+  { name: "JM Road", lat: 18.5184, lng: 73.8396 },
+  { name: "Karve Road", lat: 18.5049, lng: 73.8223 },
+  { name: "Parvati Hill", lat: 18.4940, lng: 73.8530 },
+  { name: "Wada", lat: 18.5430, lng: 73.8310 },
+  { name: "Dhankawdi", lat: 18.4699, lng: 73.8598 },
+  { name: "Kondhwa", lat: 18.4700, lng: 73.8941 },
+  { name: "Undri", lat: 18.4576, lng: 73.9112 },
+  { name: "Kharadi", lat: 18.5526, lng: 73.9430 },
+  { name: "Wagholi", lat: 18.5672, lng: 73.9762 },
+  { name: "Mundhwa", lat: 18.5219, lng: 73.9219 },
+  { name: "Lohegaon", lat: 18.5861, lng: 73.9107 },
+  { name: "Dhanori", lat: 18.5900, lng: 73.9019 },
+  { name: "Chakan", lat: 18.7602, lng: 73.8649 },
+  { name: "Talegaon", lat: 18.7274, lng: 73.6736 },
+  { name: "Alandi", lat: 18.6748, lng: 73.8978 },
+  { name: "Dehu Road", lat: 18.6720, lng: 73.7512 },
+  { name: "Ambegaon", lat: 18.5230, lng: 73.8060 },
+  { name: "Nanded City", lat: 18.4586, lng: 73.8196 },
+  { name: "Warje", lat: 18.4894, lng: 73.8098 },
+  { name: "Bavdhan", lat: 18.5154, lng: 73.7823 },
+  { name: "Pashan", lat: 18.5323, lng: 73.8011 },
+  { name: "Model Colony", lat: 18.5280, lng: 73.8388 },
+  { name: "Pune University", lat: 18.5590, lng: 73.8124 },
+  { name: "Nashik Road", lat: 18.5781, lng: 73.8571 },
+  { name: "Vanaz", lat: 18.5062, lng: 73.7929 },
+];
 
 export const policeStations: PoliceStation[] = [
   { id: "ps1", name: "Shivajinagar Police Station", address: "FC Road, Shivajinagar, Pune", phone: "020-25501234", lat: 18.5314, lng: 73.8446, jurisdiction: "Shivajinagar", distance: "1.2 km" },
@@ -108,6 +172,62 @@ export const mockRoutes: RouteOption[] = [
 export const defaultContacts: TrustedContact[] = [
   { id: "c1", name: "Mom", phone: "+91 98765 43210", relation: "Mother" },
   { id: "c2", name: "Best Friend", phone: "+91 98765 43211", relation: "Friend" },
+];
+
+// ── Safety infrastructure ──────────────────────────────────────────────────────
+export type SafeZoneType = "police" | "hospital" | "commercial";
+
+export interface SafeZone {
+  lat: number;
+  lng: number;
+  type: SafeZoneType;
+  name: string;
+  safety: number; // 0-100
+}
+
+export interface CrimeHotspot {
+  lat: number;
+  lng: number;
+  name: string;
+  danger: number; // 0-100
+  incidents: number;
+  issues: string[];
+}
+
+export const safeZones: SafeZone[] = [
+  // Police Stations
+  { lat: 18.5204, lng: 73.8567, type: "police", name: "Shivajinagar Police Station", safety: 95 },
+  { lat: 18.4899, lng: 73.8056, type: "police", name: "Pune Cantonment Police", safety: 93 },
+  { lat: 18.5640, lng: 73.7802, type: "police", name: "Vishrantwadi Police Station", safety: 92 },
+  { lat: 18.4574, lng: 73.8077, type: "police", name: "Koregaon Park Police Station", safety: 94 },
+  { lat: 18.5089, lng: 73.8553, type: "police", name: "Camp Police Station", safety: 91 },
+  { lat: 18.5018, lng: 73.8636, type: "police", name: "Swargate Police Station", safety: 90 },
+  // Hospitals
+  { lat: 18.5104, lng: 73.8467, type: "hospital", name: "KEM Hospital", safety: 90 },
+  { lat: 18.5304, lng: 73.8367, type: "hospital", name: "Ruby Hall Clinic", safety: 88 },
+  { lat: 18.4532, lng: 73.8677, type: "hospital", name: "Sassoon Hospital", safety: 87 },
+  { lat: 18.5608, lng: 73.7728, type: "hospital", name: "Aditya Birla Memorial Hospital", safety: 89 },
+  { lat: 18.4988, lng: 73.8213, type: "hospital", name: "Deenanath Mangeshkar Hospital", safety: 86 },
+  { lat: 18.5590, lng: 73.9143, type: "hospital", name: "Columbia Asia Hospital", safety: 85 },
+  // Safe Commercial / IT Areas
+  { lat: 18.5404, lng: 73.8767, type: "commercial", name: "Phoenix MarketCity", safety: 85 },
+  { lat: 18.5604, lng: 73.7767, type: "commercial", name: "Amanora Mall", safety: 82 },
+  { lat: 18.5200, lng: 73.8500, type: "commercial", name: "Camp Area Shopping", safety: 80 },
+  { lat: 18.4700, lng: 73.8300, type: "commercial", name: "MG Road Commercial", safety: 83 },
+  { lat: 18.5300, lng: 73.8400, type: "commercial", name: "JM Road Commercial", safety: 81 },
+  { lat: 18.5679, lng: 73.9143, type: "commercial", name: "Viman Nagar IT Hub", safety: 84 },
+  { lat: 18.5912, lng: 73.7389, type: "commercial", name: "Hinjewadi IT Park", safety: 83 },
+];
+
+export const crimeHotspots: CrimeHotspot[] = [
+  { lat: 18.5004, lng: 73.8667, name: "Industrial Area – Poorly Lit", danger: 85, incidents: 12, issues: ["Poor lighting", "Isolated area", "Limited police patrol"] },
+  { lat: 18.4704, lng: 73.8567, name: "Under Construction Zone – Hadapsar", danger: 78, incidents: 8, issues: ["Construction barriers", "Unlit roads", "Fewer people"] },
+  { lat: 18.5804, lng: 73.8467, name: "Remote Area – Kharadi", danger: 82, incidents: 15, issues: ["Remote location", "Limited CCTV", "Dark alleys"] },
+  { lat: 18.4404, lng: 73.8200, name: "Highway Stretch – Kondhwa", danger: 88, incidents: 20, issues: ["Isolated highway", "Limited help", "Poor street lighting"] },
+  { lat: 18.5500, lng: 73.7900, name: "Underpass – Aundh", danger: 92, incidents: 25, issues: ["Dark underpass", "Echo chamber", "Limited visibility"] },
+  { lat: 18.4800, lng: 73.8800, name: "Old Pune Area – Narrow Lanes", danger: 95, incidents: 30, issues: ["Narrow lanes", "Old buildings", "Poor lighting"] },
+  { lat: 18.5150, lng: 73.9050, name: "Deserted Stretch – Wadgaon", danger: 75, incidents: 10, issues: ["No CCTV", "Deserted at night", "Far from police"] },
+  { lat: 18.5700, lng: 73.8600, name: "Dark Road – Dhanori", danger: 80, incidents: 14, issues: ["Broken streetlights", "No pedestrian path", "Night crimes reported"] },
 ];
 
 export const heatmapData = [

@@ -2,13 +2,10 @@ import jwt from "jsonwebtoken"
 import User from "../model/user.model.js";
 export const protectedRoute = async (req,res,next)=>{
    try{
-    console.log("Cookies object:", req.cookies);
-console.log("JWT:", req.cookies?.jwt);
-
    const token = req.cookies.jwt;
 
    if(!token){
-    return res.status(400).json({message:"token required"})
+   return res.status(401).json({message:"token required"})
    }
    const validate = jwt.verify(token,process.env.JWTSECRET);
         const user = await User.findById(validate.userId).select("-password");

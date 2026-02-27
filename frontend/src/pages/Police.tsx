@@ -5,6 +5,7 @@ import { policeStations } from "@/lib/mockData";
 import { useI18n } from "@/lib/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { getMapOverview } from "@/lib/api";
+import DashboardNav from "@/components/DashboardNav";
 
 export default function PolicePage() {
   const { t } = useI18n();
@@ -12,7 +13,9 @@ export default function PolicePage() {
   const stations = data?.policeStations || policeStations;
 
   return (
-    <div className="min-h-screen pt-20 pb-10 px-4">
+    <div className="min-h-[100dvh] flex bg-background">
+      <DashboardNav />
+      <main className="flex-1 overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-24 md:pb-10">
       <div className="container mx-auto max-w-3xl space-y-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center">
           <h1 className="font-display text-3xl font-bold mb-2">{t("nav.police")}</h1>
@@ -62,6 +65,7 @@ export default function PolicePage() {
           ))}
         </div>
       </div>
+      </main>
     </div>
   );
 }

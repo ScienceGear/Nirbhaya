@@ -1,11 +1,15 @@
 import http from "node:http";
 import { Server } from "socket.io";
 import express from "express";
+
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+
 const io = new Server(server, {
     cors: {
-        origin: ["http://localhost:5173","*"],
+        origin: [allowedOrigin],
         methods: ["GET", "POST"],
         credentials: true
     }});
@@ -19,6 +23,8 @@ io.on("connection",(socket)=>{
         socket.on("updateLocation", (data)=>{
             console.log("Received location update:", data);
             const { lat, lng, username, to } = data;
+            if (!Array.isArray(to)) return;
+
             to.forEach((userId)=>{
                 const targetSocketId = Object.keys(socketMap).find(key => socketMap[key] === userId);
                 if(targetSocketId){
