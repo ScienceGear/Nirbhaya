@@ -5,7 +5,7 @@ import {
   Search, Navigation, Shield, Layers, AlertTriangle, MapPin, Phone,
   Home, Map, Siren, FileWarning, Settings, Sun, Moon, LogOut, Star,
   User, ChevronDown, ChevronUp, X, Share2, ShieldCheck,
-  Activity, Crosshair, ArrowUp, CornerUpRight,
+  Activity, Crosshair, ArrowUp, CornerUpRight, LocateFixed, Locate,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -81,7 +81,7 @@ function filterLocations(q: string): DemoLocation[] {
 }
 
 type Suggestion =
-  | { kind: "local"; loc: DemoLocation }
+  | { kind: "local"; loc: DemoLocation; distKm?: number }
   | { kind: "google"; label: string; placeId: string };
 
 /* ─── LocationInput with Google Places autocomplete ─────────────────────── */
@@ -91,12 +91,14 @@ function LocationInput({
   onSelect,
   placeholder,
   dotColor,
+  userLoc,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSelect: (loc: DemoLocation) => void;
   placeholder: string;
   dotColor: string;
+  userLoc?: { lat: number; lng: number } | null;
 }) {
   const [open, setOpen] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -120,7 +122,11 @@ function LocationInput({
   }, []);
 
   const fetchSuggestions = useCallback((q: string) => {
-    const local: Suggestion[] = filterLocations(q).map((loc) => ({ kind: "local", loc }));
+    const local: Suggestion[] = filterLocations(q).map((loc) => ({
+      kind: "local" as const,
+      loc,
+      distKm: userLoc ? haversineKm(userLoc.lat, userLoc.lng, loc.lat, loc.lng) : undefined,
+    }));
     if (!acRef.current || q.trim().length < 2) {
       setSuggestions(local.slice(0, 6));
       return;
@@ -250,6 +256,11 @@ function LocationInput({
                   <span className="truncate">
                     {s.kind === "local" ? s.loc.name : s.label}
                   </span>
+                  {s.kind === "local" && typeof s.distKm === "number" && (
+                    <span className="ml-auto text-[10px] text-muted-foreground/70 shrink-0 tabular-nums">
+                      {s.distKm < 1 ? `${Math.round(s.distKm * 1000)} m` : `${s.distKm.toFixed(1)} km`}
+                    </span>
+                  )}
                   {s.kind === "google" && (
                     <span className="ml-auto text-[9px] text-muted-foreground/60 shrink-0">Google</span>
                   )}
@@ -477,14 +488,15 @@ function makeUserArrowIcon(heading: number) {
 function MapController({
   center,
   routeCoords,
+  userLoc: mapUserLoc,
 }: {
   center: [number, number];
   routeCoords?: [number, number][];
+  userLoc?: { lat: number; lng: number } | null;
 }) {
   const map = useMap();
   useEffect(() => {
     if (routeCoords && routeCoords.length >= 2) {
-      // Convert [lng,lat] pairs to Leaflet LatLng then fitBounds
       const latlngs = routeCoords.map(([lng, lat]) => L.latLng(lat, lng));
       map.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60], maxZoom: 16 });
     } else {
@@ -492,6 +504,15 @@ function MapController({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeCoords, center]);
+
+  /* Expose recenter-to-user via window for the Locate button */
+  useEffect(() => {
+    (window as any).__mapGoToUser = () => {
+      if (mapUserLoc) map.setView([mapUserLoc.lat, mapUserLoc.lng], 15, { animate: true });
+    };
+    return () => { delete (window as any).__mapGoToUser; };
+  }, [mapUserLoc, map]);
+
   return null;
 }
 
@@ -1060,11 +1081,12 @@ function VerticalSidebar2() {
 
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 export default function Dashboard() {
-  const [origin, setOrigin] = useState("Pune Station");
-  const [originLoc, setOriginLoc] = useState<DemoLocation | null>(resolveLocation2("Pune Station"));
-  const [destination, setDestination] = useState("FC Road");
-  const [destLoc, setDestLoc] = useState<DemoLocation | null>(resolveLocation2("FC Road"));
-  const [routes, setRoutes] = useState<RouteOption[]>(mockRoutes);
+  const [origin, setOrigin] = useState("");
+  const [originLoc, setOriginLoc] = useState<DemoLocation | null>(null);
+  const [destination, setDestination] = useState("");
+  const [destLoc, setDestLoc] = useState<DemoLocation | null>(null);
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
   const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [showPolice, setShowPolice] = useState(true);
@@ -1183,12 +1205,34 @@ export default function Dashboard() {
     return () => navigator.geolocation.clearWatch(watcher);
   }, []);
 
+  /* Real deviation check: if user is > 150m from closest point on the selected route */
   useEffect(() => {
-    if (!selectedRoute) return;
-    const t1 = setTimeout(() => setDeviationAlert(true), 12000);
-    const t2 = setTimeout(() => setProximityAlert(true),  6000);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, [selectedRoute]);
+    if (!selectedRoute || !userLoc || !navMode) {
+      setDeviationAlert(false);
+      return;
+    }
+    const coords = selectedRoute.coordinates;
+    if (!coords.length) return;
+    const step = Math.max(1, Math.floor(coords.length / 60));
+    let minDist = Infinity;
+    for (let i = 0; i < coords.length; i += step) {
+      const d = haversineKm(userLoc.lat, userLoc.lng, coords[i][1], coords[i][0]);
+      if (d < minDist) minDist = d;
+    }
+    if (minDist > 0.15) {
+      setDeviationAlert(true);
+    } else {
+      setDeviationAlert(false);
+    }
+  }, [selectedRoute, userLoc, navMode]);
+
+  /* Proximity alert: warn when approaching a known hotspot */
+  useEffect(() => {
+    if (!userLoc || !navMode) { setProximityAlert(false); return; }
+    const nearHotspot = crimeHotspots.some((h) => haversineKm(userLoc.lat, userLoc.lng, h.lat, h.lng) < 0.35);
+    const nearIncident = mapIncidents.some((inc) => inc.severity >= 3 && haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 0.25);
+    setProximityAlert(nearHotspot || nearIncident);
+  }, [userLoc, navMode, mapIncidents]);
 
   const handleSearch = async () => {
     const s = originLoc || resolveLocation2(origin);
@@ -1201,6 +1245,7 @@ export default function Dashboard() {
       const gen = await fetchRealRoutes(s, e, mapIncidents);
       setRoutes(gen);
       setSelectedRoute(gen[0]);
+      setHasSearched(true);
       setShowDetail(true);
       setDeviationAlert(false);
       setProximityAlert(false);
@@ -1237,6 +1282,7 @@ export default function Dashboard() {
           <MapController
             center={mapCenter}
             routeCoords={selectedRoute?.coordinates}
+            userLoc={userLoc}
           />
           {navMode && <NavMapController userLoc={userLoc} />}
 
@@ -1433,8 +1479,8 @@ export default function Dashboard() {
         )}
 
         {!navMode && <div
-          className="absolute left-2 right-2 md:left-3 md:right-auto top-2 md:top-3 z-[500] flex flex-col gap-2 md:w-[310px]"
-          style={{ maxHeight: "calc(100dvh - 16px)", overflow: "hidden" }}
+          className="absolute left-2 right-2 md:left-3 md:right-auto top-2 md:top-3 z-[500] flex flex-col gap-2 md:w-[340px]"
+          style={{ maxHeight: "calc(100dvh - 80px)", overflowY: "auto", overflowX: "hidden" }}
         >
           {/* Search card */}
           <motion.div
@@ -1467,14 +1513,32 @@ export default function Dashboard() {
                 >
                   <div className="px-4 pb-4 space-y-2.5 border-t border-border">
                     {/* Origin */}
-                    <div className="pt-3">
+                    <div className="pt-3 space-y-1.5">
                       <LocationInput
                         value={origin}
                         onChange={(v) => { setOrigin(v); setOriginLoc(null); }}
                         onSelect={(loc) => { setOrigin(loc.name); setOriginLoc(loc); setSearchError(""); }}
                         placeholder="From — e.g. Pune Station"
                         dotColor="#22c55e"
+                        userLoc={userLoc}
                       />
+                      {!originLoc && (
+                        <button
+                          type="button"
+                          className="flex items-center gap-1.5 text-[11px] text-primary font-medium hover:underline pl-1"
+                          onClick={() => {
+                            if (userLoc) {
+                              setOrigin("Your Location");
+                              setOriginLoc({ name: "Your Location", lat: userLoc.lat, lng: userLoc.lng });
+                              setSearchError("");
+                            } else {
+                              setSearchError("Getting your location…");
+                            }
+                          }}
+                        >
+                          <LocateFixed className="h-3 w-3" /> Use my current location
+                        </button>
+                      )}
                     </div>
 
                     <div className="pl-3.5">
@@ -1488,6 +1552,7 @@ export default function Dashboard() {
                       onSelect={(loc) => { setDestination(loc.name); setDestLoc(loc); setSearchError(""); }}
                       placeholder="To — e.g. Kothrud"
                       dotColor="#ef4444"
+                      userLoc={userLoc}
                     />
 
                     {searchError && (
@@ -1536,13 +1601,14 @@ export default function Dashboard() {
             </AnimatePresence>
           </motion.div>
 
-          {/* Routes list card */}
+          {/* Routes list card — only shown after search */}
+          {hasSearched && routes.length > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.07 }}
             className="rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated overflow-y-auto"
-            style={{ maxHeight: "calc(100dvh - 270px)" }}
+            style={{ maxHeight: "calc(100dvh - 320px)" }}
           >
             <div className="px-4 pt-3 pb-1 border-b border-border">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1644,22 +1710,34 @@ export default function Dashboard() {
               )}
             </AnimatePresence>
           </motion.div>
+          )}
         </div>}
 
+        {/* Recenter / My Location button */}
+        {!navMode && (
+          <button
+            onClick={() => { (window as any).__mapGoToUser?.(); }}
+            className="absolute bottom-20 md:bottom-6 right-3 z-[500] h-10 w-10 rounded-full bg-card/95 backdrop-blur-xl border border-border shadow-elevated flex items-center justify-center hover:bg-muted transition-colors"
+            title="Go to my location"
+          >
+            <Locate className="h-5 w-5 text-primary" />
+          </button>
+        )}
 
-        {/* â”€â”€ Deviation / proximity alerts (top-right corner) â”€â”€ */}
+        {/*
         {/* Safety Mode toggle button (top-right) */}
-        <div className="absolute top-3 right-3 z-[500]">
+        <div className="absolute top-2 right-2 md:top-3 md:right-3 z-[500]">
           <button
             onClick={toggleSafetyMode}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold shadow-elevated transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl text-xs md:text-sm font-semibold shadow-elevated transition-all ${
               safetyMode
                 ? "bg-emerald-500 text-white hover:bg-emerald-600"
                 : "bg-card/95 backdrop-blur-xl border border-border text-foreground hover:bg-muted"
             }`}
           >
-            <ShieldCheck className="h-4 w-4" />
-            {safetyMode ? "🚺 Safety Mode ON" : "Activate Safety Mode"}
+            <ShieldCheck className="h-3.5 w-3.5 md:h-4 md:w-4" />
+            <span className="hidden sm:inline">{safetyMode ? "🚺 Safety Mode ON" : "Activate Safety Mode"}</span>
+            <span className="sm:hidden">{safetyMode ? "ON" : "Safety"}</span>
           </button>
         </div>
 
@@ -1702,7 +1780,7 @@ export default function Dashboard() {
 
         {/* â”€â”€ Legend bottom-left â”€â”€ */}
         {/* Legend bottom-left */}
-        <div className="absolute bottom-4 left-3 z-[500] flex flex-wrap items-center gap-3 px-3 py-1.5 rounded-xl bg-card/90 backdrop-blur-md border border-border shadow-soft text-xs text-muted-foreground max-w-xs">
+        <div className="absolute bottom-20 md:bottom-4 left-2 md:left-3 z-[500] flex flex-wrap items-center gap-2 md:gap-3 px-2 md:px-3 py-1 md:py-1.5 rounded-xl bg-card/90 backdrop-blur-md border border-border shadow-soft text-[10px] md:text-xs text-muted-foreground max-w-[260px] md:max-w-xs">
           <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-blue-500" />Police</span>
           <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-red-500" />Incident</span>
           {showSafeZones && <>
