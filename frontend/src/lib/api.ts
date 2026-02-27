@@ -21,6 +21,7 @@ export async function getMapOverview() {
       center: [number, number];
       policeStations: typeof policeStations;
       incidents: typeof incidents;
+      clusters?: Array<{ id: string; lat: number; lng: number; count: number }>;
       routes: typeof mockRoutes;
       heatmap: Array<{ lat: number; lng: number; weight: number }>;
     }>("/api/map/overview");
@@ -29,6 +30,7 @@ export async function getMapOverview() {
       center: [73.8567, 18.5204] as [number, number],
       policeStations,
       incidents,
+      clusters: [],
       routes: mockRoutes,
       heatmap: [],
     };
@@ -74,9 +76,34 @@ export async function submitReport(data: {
   description: string;
   location: string;
   anonymous: boolean;
+  lat?: number;
+  lng?: number;
+  areaRating: number;
+  imageUrl?: string;
+  reporterId?: string;
 }) {
-  return request<{ success: boolean }>("/api/reports", {
+  return request<{ success: boolean; pointsAwarded: number; totalPoints: number }>("/api/reports", {
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+export async function getUserPoints(userId: string) {
+  return request<{ userId: string; totalPoints: number }>(`/api/points?userId=${encodeURIComponent(userId)}`);
+}
+
+export async function getCrowdHeatmap(params?: { lat?: number; lng?: number; radiusKm?: number; hour?: number }) {
+  const query = new URLSearchParams();
+  if (typeof params?.lat === "number") query.set("lat", String(params.lat));
+  if (typeof params?.lng === "number") query.set("lng", String(params.lng));
+  if (typeof params?.radiusKm === "number") query.set("radiusKm", String(params.radiusKm));
+  if (typeof params?.hour === "number") query.set("hour", String(params.hour));
+
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<{
+    center: [number, number];
+    hour: number;
+    points: Array<{ id: string; lat: number; lng: number; busyPct: number; weight: number; source: string }>;
+    summary: { totalPoints: number; averageBusyPct: number };
+  }>(`/api/crowd/heatmap${suffix}`);
 }

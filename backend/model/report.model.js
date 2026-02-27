@@ -17,6 +17,36 @@ const ReportSchema = new mongoose.Schema({
         type: String,
         enum: ["Low", "Medium", "High"],
         default: "Low"
+    },
+    incidentType: {
+        type: String,
+        default: "unsafe_area"
+    },
+    locationText: {
+        type: String,
+        default: ""
+    },
+    anonymous: {
+        type: Boolean,
+        default: true
+    },
+    areaRating: {
+        type: Number,
+        min: 1,
+        max: 5,
+        default: 3
+    },
+    imageUrl: {
+        type: String,
+        default: ""
+    },
+    pointsAwarded: {
+        type: Number,
+        default: 0
+    },
+    reporterKey: {
+        type: String,
+        default: "guest"
     }
 
 });

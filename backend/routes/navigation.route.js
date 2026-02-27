@@ -2,7 +2,9 @@ import { Router } from "express";
 import {
   createReportCompat,
   getContactsCompat,
+  getCrowdHeatmapCompat,
   getMapOverview,
+  getUserPointsCompat,
   getReportsCompat,
   saveContactsCompat,
   triggerSosCompat,
@@ -16,5 +18,7 @@ navigationRouter.post("/reports", createReportCompat);
 navigationRouter.get("/contacts", getContactsCompat);
 navigationRouter.put("/contacts", saveContactsCompat);
 navigationRouter.post("/sos", triggerSosCompat);
+navigationRouter.get("/points", getUserPointsCompat);
+navigationRouter.get("/crowd/heatmap", getCrowdHeatmapCompat);
 
 export default navigationRouter;

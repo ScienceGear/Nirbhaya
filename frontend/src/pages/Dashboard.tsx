@@ -20,7 +20,7 @@ import DashboardNav from "@/components/DashboardNav";
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getMapOverview } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview } from "@/lib/api";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 
 /* ─── Google Maps API config ─────────────────────────────────────────────── */
@@ -316,7 +316,40 @@ function buildFallbackRoutes(
 async function fetchRealRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
+  incidentData: Array<{ lat: number; lng: number; severity: number; areaRating?: number }> = [],
 ): Promise<RouteOption[]> {
+  const haversineKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) *
+        Math.sin(dLng / 2);
+    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  const computeRoutePenalty = (coords: [number, number][]) => {
+    if (!incidentData.length || !coords.length) return 0;
+    const step = Math.max(1, Math.floor(coords.length / 80));
+    let penalty = 0;
+    incidentData.forEach((incident) => {
+      let minDist = Infinity;
+      for (let i = 0; i < coords.length; i += step) {
+        const [lng, lat] = coords[i];
+        const dist = haversineKm(lat, lng, incident.lat, incident.lng);
+        if (dist < minDist) minDist = dist;
+      }
+      if (minDist <= 1.2) {
+        const ratingRisk = typeof incident.areaRating === "number" ? Math.max(0, 3 - incident.areaRating) : 0;
+        penalty += (incident.severity || 1) * (1.3 - Math.min(minDist, 1)) + ratingRisk * 1.5;
+      }
+    });
+    return Math.min(35, Math.round(penalty));
+  };
+
   try {
     // Use OSRM public API – foot profile for pedestrian safety navigation
     const url =
@@ -341,17 +374,25 @@ async function fetchRealRoutes(
       ["Lowest ETA", "Direct road geometry", "Avoid if you prefer higher safety score"],
     ];
 
-    const primary = data.routes.slice(0, 3).map((r: any, i: number) => ({
+    const primary = data.routes.slice(0, 3).map((r: any, i: number) => {
+      const coords = r.geometry.coordinates as [number, number][];
+      const routePenalty = computeRoutePenalty(coords);
+      const adjustedRsi = Math.max(20, RSI[i] - routePenalty);
+      const reasons = [...REASONS[i]];
+      if (routePenalty >= 5) {
+        reasons.push("Community reports near this area lowered RSI");
+      }
+      return {
       id: `r${i + 1}`,
       name: NAMES[i],
       type: TYPES[i],
-      rsi: RSI[i],
+      rsi: adjustedRsi,
       duration: `${Math.round(r.duration / 60)} min`,
       distance: `${(r.distance / 1000).toFixed(1)} km`,
       color: COLOR[i],
-      reasons: REASONS[i],
-      coordinates: r.geometry.coordinates as [number, number][],
-    }));
+      reasons,
+      coordinates: coords,
+    }});
 
     if (primary.length >= 3) return primary;
 
@@ -817,7 +858,24 @@ export default function Dashboard() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const crowdQueryLat = userLoc?.lat ?? originLoc?.lat ?? PUNE_CENTER[1];
+  const crowdQueryLng = userLoc?.lng ?? originLoc?.lng ?? PUNE_CENTER[0];
+  const currentHour = new Date().getHours();
+
+  const { data: crowdHeat } = useQuery({
+    queryKey: ["crowd-heatmap", crowdQueryLat.toFixed(3), crowdQueryLng.toFixed(3), currentHour],
+    queryFn: () => getCrowdHeatmap({
+      lat: crowdQueryLat,
+      lng: crowdQueryLng,
+      radiusKm: 8,
+      hour: currentHour,
+    }),
+    staleTime: 2 * 60 * 1000,
+  });
+
   const mapIncidents = overview?.incidents || incidents;
+  const mapClusters = overview?.clusters || [];
+  const mapHeat = overview?.heatmap || [];
   const stationData  = overview?.policeStations || policeStations;
   const userArrowIcon = useMemo(() => makeUserArrowIcon(userHeading), [userHeading]);
 
@@ -871,7 +929,7 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchRealRoutes(s, e);
+      const gen = await fetchRealRoutes(s, e, mapIncidents);
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setShowDetail(true);
@@ -944,6 +1002,47 @@ export default function Dashboard() {
                 radius={radius}
                 pathOptions={{ color, fillColor: color, fillOpacity: 0.12, weight: 0 }}
               />
+            );
+          })}
+          {showHeatmap && mapHeat.map((point, i) => {
+            const radius = Math.round(130 + point.weight * 260);
+            return (
+              <Circle
+                key={`heat-live-${i}`}
+                center={[point.lat, point.lng]}
+                radius={radius}
+                pathOptions={{ color: "#dc2626", fillColor: "#dc2626", fillOpacity: 0.06, weight: 0 }}
+              />
+            );
+          })}
+          {showHeatmap && mapClusters.map((cluster) => (
+            <Circle
+              key={`heat-cluster-${cluster.id}`}
+              center={[cluster.lat, cluster.lng]}
+              radius={Math.round(180 + Math.min(cluster.count, 25) * 22)}
+              pathOptions={{ color: "#b91c1c", fillColor: "#b91c1c", fillOpacity: 0.1, weight: 0 }}
+            >
+              <Popup>
+                <strong className="block text-sm">SafeCity Cluster</strong>
+                <span className="text-xs text-muted-foreground">Incidents in area: {cluster.count}</span>
+              </Popup>
+            </Circle>
+          ))}
+          {showHeatmap && (crowdHeat?.points || []).map((point) => {
+            const color = point.busyPct >= 70 ? "#dc2626" : point.busyPct >= 45 ? "#f97316" : "#2563eb";
+            const radius = Math.round(140 + point.weight * 300);
+            return (
+              <Circle
+                key={`heat-crowd-${point.id}`}
+                center={[point.lat, point.lng]}
+                radius={radius}
+                pathOptions={{ color, fillColor: color, fillOpacity: 0.11, weight: 0 }}
+              >
+                <Popup>
+                  <strong className="block text-sm">Crowd (hour {crowdHeat?.hour}:00)</strong>
+                  <span className="text-xs text-muted-foreground">Estimated busy: {point.busyPct}%</span>
+                </Popup>
+              </Circle>
             );
           })}
           {showHeatmap && crimeHotspots.map((h, i) => (

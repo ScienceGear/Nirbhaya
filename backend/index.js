@@ -14,8 +14,20 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
 
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://localhost:8084",
+    "http://localhost:8083",
+];
+
 app.use(cors({
-    origin: "http://localhost:5173",
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+            return;
+        }
+        callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
 }));
 app.use(express.urlencoded({ extended: true }));

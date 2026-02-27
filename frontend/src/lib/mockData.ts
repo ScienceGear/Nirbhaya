@@ -20,6 +20,10 @@ export interface Incident {
   timestamp: string;
   anonymous: boolean;
   severity: 1 | 2 | 3;
+  areaRating?: number;
+  imageUrl?: string;
+  locationText?: string;
+  pointsAwarded?: number;
 }
 
 export interface RouteOption {
