@@ -1,6 +1,6 @@
 import PoliceStation from "../model/policestations.model.js";
 import Report from "../model/report.model.js";
-import { getSafeCityMapData } from "../library/safecity.library.js";
+import { getSafeCityMapData, getSafeCityNear } from "../library/safecity.library.js";
 
 const contactsStore = new Map();
 const userPointsStore = new Map();
@@ -160,6 +160,11 @@ function getTimeCrowdFactor(hour) {
 
 export const getMapOverview = async (_req, res) => {
   try {
+    // Accept user location from query params, fallback to default center (Pune)
+    const userLat = parseFloat(_req.query.lat) || defaultCenter[1];
+    const userLng = parseFloat(_req.query.lng) || defaultCenter[0];
+    const radiusKm = parseFloat(_req.query.radiusKm) || 10;
+
     const recentReports = await Report.find({}).sort({ timestamp: -1 }).limit(300);
     const areaStats = buildAreaStats(recentReports);
 
@@ -176,18 +181,25 @@ export const getMapOverview = async (_req, res) => {
       distance: "Nearby",
     }));
 
-    let safeCityPayload = { incidents: [], clusters: [], heatmap: [] };
+    // Fetch SafeCity incidents near the USER, not hardcoded center
+    let safeCityIncidents = [];
+    let safeCityHeatmap = [];
     try {
-      safeCityPayload = await getSafeCityMapData({
-        centerLat: defaultCenter[1],
-        centerLng: defaultCenter[0],
-        radiusKm: 14,
-        mapZoom: 11,
+      safeCityIncidents = await getSafeCityNear({
+        lat: userLat,
+        lng: userLng,
+        radiusKm,
+        limit: 300,
         city: "Pune",
       });
-      console.log(`[SafeCity] Fetched ${safeCityPayload.incidents.length} incidents, ${safeCityPayload.clusters.length} clusters`);
+      safeCityHeatmap = safeCityIncidents.map((inc) => ({
+        lat: inc.lat,
+        lng: inc.lng,
+        weight: Math.min(1, Math.max(0.2, inc.severity / 3)),
+      }));
+      console.log(`[SafeCity] Loaded ${safeCityIncidents.length} incidents near [${userLat}, ${userLng}]`);
     } catch (error) {
-      console.error("[SafeCity] Scraper error:", error.message || error);
+      console.error("[SafeCity] Error:", error.message || error);
     }
 
     const localIncidents = recentReports.slice(0, 120).map((report) => ({
@@ -204,22 +216,22 @@ export const getMapOverview = async (_req, res) => {
       locationText: report.locationText || "",
     }));
 
-    const incidents = safeCityPayload.incidents.length
-      ? [...localIncidents, ...safeCityPayload.incidents]
+    const incidents = safeCityIncidents.length
+      ? [...localIncidents, ...safeCityIncidents]
       : localIncidents.length ? localIncidents : fallbackIncidents;
 
     const mergedIncidents = incidents;
     const adjustedRoutes = applyAreaPenaltyToRoutes(fallbackRoutes, areaStats);
 
     return res.json({
-      center: defaultCenter,
+      center: [userLng, userLat],
       policeStations: policeStations.length ? policeStations : [],
       incidents: mergedIncidents,
-      clusters: safeCityPayload.clusters,
+      clusters: [],
       routes: adjustedRoutes,
       areaStats,
-      heatmap: safeCityPayload.heatmap.length
-        ? safeCityPayload.heatmap
+      heatmap: safeCityHeatmap.length
+        ? safeCityHeatmap
         : mergedIncidents.map((incident) => ({
             lat: incident.lat,
             lng: incident.lng,

@@ -1,18 +1,22 @@
+import SafeCityIncident from "../model/safecityIncident.model.js";
+
 const SAFECITY_BASE_URL = "https://webapp.safecity.in";
 
-/* ── Simple in-memory cache (TTL: 10 minutes) ── */
-let _cache = null;
-let _cacheTs = 0;
-const CACHE_TTL_MS = 10 * 60 * 1000;
+/* ── Scrape cooldown: don't re-scrape same area within 30 min ── */
+const _scrapedAreas = new Map(); // key → timestamp
+const SCRAPE_COOLDOWN_MS = 30 * 60 * 1000;
 
-/* ── Additional caches for different data types ── */
+/* ── In-memory caches for rarely-changing data ── */
 let _categoriesCache = null;
 let _categoriesCacheTs = 0;
 let _incidentDescCache = null;
 let _incidentDescCacheTs = 0;
 let _safetyDescCache = null;
 let _safetyDescCacheTs = 0;
-let _incidentDetailsCache = {}; // Per-incident cache
+
+/* ═══════════════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════════════ */
 
 function toNumber(value) {
   const parsed = Number(value);
@@ -22,7 +26,6 @@ function toNumber(value) {
 function createBoundsFromCenter(lat, lng, radiusKm) {
   const latDelta = radiusKm / 111;
   const lngDelta = radiusKm / (111 * Math.cos((lat * Math.PI) / 180));
-
   return {
     ne: { lat: lat + latDelta, lng: lng + lngDelta },
     sw: { lat: lat - latDelta, lng: lng - lngDelta },
@@ -51,15 +54,21 @@ async function postSafeCity(path, params) {
     },
     body: toFormBody(params),
   });
-
-  if (!response.ok) {
-    throw new Error(`SafeCity request failed: ${response.status}`);
-  }
-
+  if (!response.ok) throw new Error(`SafeCity ${path} failed: ${response.status}`);
   return response.json();
 }
 
-function normalizeIncident(item, index) {
+/* ── Area key for cooldown map (rounded to ~1 km grid) ── */
+function areaKey(lat, lng, radiusKm) {
+  return `${lat.toFixed(2)}:${lng.toFixed(2)}:${radiusKm}`;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SCRAPE  →  MONGO  CACHING
+   ═══════════════════════════════════════════════════════════════ */
+
+/** Parse one raw SafeCity item into fields matching our Mongoose schema. */
+function parseSafeCityItem(item) {
   const lat = toNumber(item?.lat ?? item?.latitude);
   const lng = toNumber(item?.lng ?? item?.longitude);
   if (lat === null || lng === null) return null;
@@ -68,10 +77,12 @@ function normalizeIncident(item, index) {
     toNumber(item?.severity) ||
     (toNumber(item?.count) && toNumber(item?.count) > 8 ? 3 : 2);
 
-  // Build comma-separated category string from categories array or string
   let categories = "";
   if (Array.isArray(item?.categories)) {
-    categories = item.categories.map((c) => c?.name ?? c?.category_name ?? c).filter(Boolean).join(" | ");
+    categories = item.categories
+      .map((c) => c?.name ?? c?.category_name ?? c)
+      .filter(Boolean)
+      .join(" | ");
   } else if (typeof item?.categories === "string") {
     categories = item.categories;
   } else if (item?.category) {
@@ -80,64 +91,34 @@ function normalizeIncident(item, index) {
     categories = String(item.incident_category);
   }
 
+  const scId = String(item?.id ?? item?._id ?? `sc-${lat.toFixed(5)}-${lng.toFixed(5)}`);
+
   return {
-    id: String(item?.id ?? `sc-incident-${index}`),
-    type: "unsafe_area",
-    description: String(item?.description || item?.incident_text || "Reported incident"),
-    lat,
-    lng,
-    timestamp: item?.created_at || item?.timestamp || new Date().toISOString(),
-    anonymous: true,
-    severity: Math.min(3, Math.max(1, Math.round(severity))),
-    // Rich fields from SafeCity
+    scId,
     categories,
-    location: item?.location || item?.place || item?.city || "",
+    description: String(item?.description || item?.incident_text || ""),
+    location: { type: "Point", coordinates: [lng, lat] },
+    locationText: item?.location || item?.place || item?.city || "",
     dateText: item?.date || item?.incident_date || "",
     timeText: item?.time || item?.incident_time || "",
-    age: item?.age || item?.person_age || "",
-    gender: item?.gender || item?.person_gender || "",
+    age: String(item?.age || item?.person_age || ""),
+    gender: String(item?.gender || item?.person_gender || ""),
+    severity: Math.min(3, Math.max(1, Math.round(severity))),
+    timestamp: item?.created_at || item?.timestamp || new Date().toISOString(),
+    raw: item,
   };
 }
 
-function normalizeCluster(item, index) {
-  const lat = toNumber(item?.lat ?? item?.latitude);
-  const lng = toNumber(item?.lng ?? item?.longitude);
-  if (lat === null || lng === null) return null;
-
-  const count = Math.max(1, Math.round(toNumber(item?.count ?? item?.size) || 1));
-
-  return {
-    id: String(item?.id ?? `sc-cluster-${index}`),
-    lat,
-    lng,
-    count,
-  };
-}
-
-function dedupeByCoordinate(items) {
-  const seen = new Set();
--  return items.filter((item) => {
-    const key = `${item.lat.toFixed(5)}:${item.lng.toFixed(5)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-export async function getSafeCityMapData({
-  centerLat,
-  centerLng,
-  radiusKm = 12,
-  mapZoom = 11,
-  city = "Pune",
-}) {
-  // Return cached data if fresh
-  if (_cache && Date.now() - _cacheTs < CACHE_TTL_MS) {
-    return _cache;
-  }
+/**
+ * Scrape SafeCity for an area and upsert results into MongoDB.
+ * Skips if the same area was scraped within SCRAPE_COOLDOWN_MS.
+ */
+async function scrapeAndCache({ centerLat, centerLng, radiusKm = 8, mapZoom = 13, city = "Pune" }) {
+  const key = areaKey(centerLat, centerLng, radiusKm);
+  const lastScrape = _scrapedAreas.get(key);
+  if (lastScrape && Date.now() - lastScrape < SCRAPE_COOLDOWN_MS) return;
 
   const bounds = createBoundsFromCenter(centerLat, centerLng, radiusKm);
-
   const params = {
     lang_id: 1,
     client_id: 1,
@@ -153,188 +134,279 @@ export async function getSafeCityMapData({
     "map_bound[se][lng]": bounds.se.lng,
   };
 
-  const [clusterResponse, incidentResponse] = await Promise.allSettled([
-    postSafeCity("/api/reported-incidents", params),
-    postSafeCity("/api/reported-incidents/map-coordinates", params),
-  ]);
+  let rawIncidents = [];
+  try {
+    const resp = await postSafeCity("/api/reported-incidents/map-coordinates", params);
+    rawIncidents = Array.isArray(resp?.data) ? resp.data : [];
+  } catch (err) {
+    console.error("[SafeCity] Scrape error:", err.message);
+  }
 
-  const rawClusters =
-    clusterResponse.status === "fulfilled"
-      ? Array.isArray(clusterResponse.value?.data)
-        ? clusterResponse.value.data
-        : []
-      : [];
+  if (!rawIncidents.length) {
+    _scrapedAreas.set(key, Date.now());
+    return;
+  }
 
-  const rawIncidents =
-    incidentResponse.status === "fulfilled"
-      ? Array.isArray(incidentResponse.value?.data)
-        ? incidentResponse.value.data
-        : []
-      : [];
+  const ops = rawIncidents
+    .map(parseSafeCityItem)
+    .filter(Boolean)
+    .map((doc) => ({
+      updateOne: {
+        filter: { scId: doc.scId },
+        update: { $set: { ...doc, scrapedAt: new Date() } },
+        upsert: true,
+      },
+    }));
 
-  // Geographic filter — only keep points within the requested bounding box
-  const inBounds = (lat, lng) =>
-    lat >= bounds.sw.lat && lat <= bounds.ne.lat &&
-    lng >= bounds.sw.lng && lng <= bounds.ne.lng;
+  if (ops.length) {
+    try {
+      await SafeCityIncident.bulkWrite(ops, { ordered: false });
+      console.log(`[SafeCity] Cached ${ops.length} incidents for area ${key}`);
+    } catch (err) {
+      console.error("[SafeCity] DB upsert error:", err.message);
+    }
+  }
 
-  const clusters = dedupeByCoordinate(
-    rawClusters
-      .map((item, index) => normalizeCluster(item, index))
-      .filter((c) => c !== null && inBounds(c.lat, c.lng))
-  );
-
-  const incidents = dedupeByCoordinate(
-    rawIncidents
-      .map((item, index) => normalizeIncident(item, index))
-      .filter((inc) => inc !== null && inBounds(inc.lat, inc.lng))
-  );
-
-  const heatmap = [
-    ...incidents.map((incident) => ({
-      lat: incident.lat,
-      lng: incident.lng,
-      weight: Math.min(1, Math.max(0.2, incident.severity / 3)),
-    })),
-    ...clusters.map((cluster) => ({
-      lat: cluster.lat,
-      lng: cluster.lng,
-      weight: Math.min(1, Math.max(0.25, cluster.count / 20)),
-    })),
-  ];
-
-  const result = {
-    incidents,
-    clusters,
-    heatmap,
-  };
-
-  // Cache the result
-  _cache = result;
-  _cacheTs = Date.now();
-
-  return result;
+  _scrapedAreas.set(key, Date.now());
 }
 
-/* ── GET /api/get-categories?lang_id=1 ── */
-export async function getCategories(langId = 1) {
-  const CATEGORIES_TTL_MS = 60 * 60 * 1000; // 1 hour cache
-  
-  if (_categoriesCache && Date.now() - _categoriesCacheTs < CATEGORIES_TTL_MS) {
-    return _categoriesCache;
+/* ═══════════════════════════════════════════════════════════════
+   DB DOCUMENT  →  API RESPONSE FORMAT
+   ═══════════════════════════════════════════════════════════════ */
+
+function docToIncident(doc) {
+  const [lng, lat] = doc.location?.coordinates ?? [0, 0];
+  return {
+    id: doc.scId,
+    type: "safecity",
+    description: doc.description || "",
+    lat,
+    lng,
+    timestamp: doc.timestamp?.toISOString?.() ?? doc.timestamp ?? "",
+    anonymous: true,
+    severity: doc.severity || 2,
+    categories: doc.categories || "",
+    location: doc.locationText || "",
+    dateText: doc.dateText || "",
+    timeText: doc.timeText || "",
+    age: doc.age || "",
+    gender: doc.gender || "",
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PUBLIC API — called by controllers
+   ═══════════════════════════════════════════════════════════════ */
+
+/**
+ * Get SafeCity incidents near a point.
+ * Fires background scrape if area hasn't been scraped recently,
+ * then returns whatever is in MongoDB.
+ */
+export async function getSafeCityNear({
+  lat,
+  lng,
+  radiusKm = 8,
+  limit = 200,
+  mapZoom = 13,
+  city = "Pune",
+}) {
+  // Fire-and-forget scrape (does not block the response)
+  scrapeAndCache({ centerLat: lat, centerLng: lng, radiusKm, mapZoom, city }).catch(() => {});
+
+  const docs = await SafeCityIncident.find({
+    location: {
+      $near: {
+        $geometry: { type: "Point", coordinates: [lng, lat] },
+        $maxDistance: radiusKm * 1000, // metres
+      },
+    },
+  })
+    .limit(limit)
+    .lean();
+
+  return docs.map(docToIncident);
+}
+
+/**
+ * Get SafeCity incidents along a polyline route.
+ * @param {Array<[number,number]>} coords  Array of [lng, lat] pairs
+ * @param {number} corridorKm  Search width around the route (default 1 km)
+ */
+export async function getSafeCityAlongRoute({
+  coords,
+  corridorKm = 1,
+  limit = 300,
+  city = "Pune",
+}) {
+  if (!coords?.length) return [];
+
+  // Sample ≤20 points along the route for scraping
+  const step = Math.max(1, Math.floor(coords.length / 20));
+  const samples = [];
+  for (let i = 0; i < coords.length; i += step) samples.push(coords[i]);
+  if (coords.length > 1) samples.push(coords[coords.length - 1]);
+
+  // Trigger scrapes along the route (fire-and-forget)
+  for (const [sLng, sLat] of samples) {
+    scrapeAndCache({ centerLat: sLat, centerLng: sLng, radiusKm: corridorKm + 1, mapZoom: 14, city }).catch(() => {});
   }
 
-  const response = await fetch(`${SAFECITY_BASE_URL}/api/get-categories?lang_id=${langId}`, {
-    method: "GET",
-    headers: {
-      Accept: "*/*",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer: "https://webapp.safecity.in/",
-    },
-    credentials: "include",
+  // Query near each sampled point, dedupe
+  const seenIds = new Set();
+  const results = [];
+
+  for (const [sLng, sLat] of samples) {
+    const docs = await SafeCityIncident.find({
+      location: {
+        $near: {
+          $geometry: { type: "Point", coordinates: [sLng, sLat] },
+          $maxDistance: corridorKm * 1000,
+        },
+      },
+    })
+      .limit(50)
+      .lean();
+
+    for (const doc of docs) {
+      if (!seenIds.has(doc.scId)) {
+        seenIds.add(doc.scId);
+        results.push(docToIncident(doc));
+      }
+    }
+    if (results.length >= limit) break;
+  }
+
+  return results.slice(0, limit);
+}
+
+/**
+ * Full map-data endpoint — backwards-compatible drop-in.
+ * Scrape → cache → serve from MongoDB.
+ */
+export async function getSafeCityMapData({
+  centerLat,
+  centerLng,
+  radiusKm = 12,
+  mapZoom = 11,
+  city = "Pune",
+}) {
+  const incidents = await getSafeCityNear({
+    lat: centerLat,
+    lng: centerLng,
+    radiusKm,
+    limit: 500,
+    mapZoom,
+    city,
   });
 
-  if (!response.ok) {
-    throw new Error(`SafeCity categories failed: ${response.status}`);
+  const heatmap = incidents.map((inc) => ({
+    lat: inc.lat,
+    lng: inc.lng,
+    weight: Math.min(1, Math.max(0.2, inc.severity / 3)),
+  }));
+
+  return { incidents, clusters: [], heatmap };
+}
+
+/**
+ * Incident details — check MongoDB first, then fall back to SafeCity API.
+ * If fetched from the API the result is also persisted into MongoDB.
+ */
+export async function getIncidentDetails(incidentId) {
+  if (!incidentId) throw new Error("Incident ID is required");
+
+  // 1. Try the local DB
+  const doc = await SafeCityIncident.findOne({ scId: String(incidentId) }).lean();
+  if (doc) {
+    const inc = docToIncident(doc);
+    return {
+      ...inc,
+      category: doc.categories,
+      createdAt: doc.timestamp,
+      verified: false,
+      raw: doc.raw || {},
+    };
   }
 
+  // 2. Fallback: live API call
+  const data = await postSafeCity("/api/reported-incident/details", { incident_id: incidentId });
+  const raw = data?.data ?? data ?? {};
+
+  // Persist this detail into MongoDB for future lookups
+  const parsed = parseSafeCityItem({ ...raw, id: incidentId });
+  if (parsed) {
+    SafeCityIncident.updateOne(
+      { scId: parsed.scId },
+      { $set: { ...parsed, scrapedAt: new Date() } },
+      { upsert: true }
+    ).catch(() => {});
+  }
+
+  return {
+    id: String(incidentId),
+    description: raw.description ?? raw.incident_text ?? "",
+    category: raw.category ?? raw.incident_category ?? "",
+    categories: raw.category ?? raw.incident_category ?? "",
+    lat: toNumber(raw.lat ?? raw.latitude),
+    lng: toNumber(raw.lng ?? raw.longitude),
+    location: raw.location ?? raw.place ?? raw.city ?? "",
+    dateText: raw.date ?? raw.incident_date ?? "",
+    timeText: raw.time ?? raw.incident_time ?? "",
+    age: String(raw.age ?? raw.person_age ?? ""),
+    gender: String(raw.gender ?? raw.person_gender ?? ""),
+    createdAt: raw.created_at ?? null,
+    verified: raw.verified ?? false,
+    anonymous: true,
+    raw,
+  };
+}
+
+/* ── Categories (in-memory, rarely change) ── */
+export async function getCategories(langId = 1) {
+  const TTL = 60 * 60 * 1000;
+  if (_categoriesCache && Date.now() - _categoriesCacheTs < TTL) return _categoriesCache;
+
+  const response = await fetch(`${SAFECITY_BASE_URL}/api/get-categories?lang_id=${langId}`, {
+    headers: { Accept: "*/*", "X-Requested-With": "XMLHttpRequest", Referer: SAFECITY_BASE_URL + "/" },
+  });
+  if (!response.ok) throw new Error(`Categories failed: ${response.status}`);
   const data = await response.json();
-  
-  // Normalize categories
+
   const categories = Array.isArray(data)
-    ? data.map(cat => ({
-        id: cat.id ?? cat.category_id ?? cat.value,
-        name: cat.name ?? cat.category_name ?? cat.label,
-        description: cat.description ?? "",
-        icon: cat.icon ?? null,
-        color: cat.color ?? null,
+    ? data.map((c) => ({
+        id: c.id ?? c.category_id ?? c.value,
+        name: c.name ?? c.category_name ?? c.label,
+        description: c.description ?? "",
       }))
     : [];
 
   _categoriesCache = categories;
   _categoriesCacheTs = Date.now();
-
   return categories;
 }
 
-/* ── POST /getIncDesc - Incident Descriptions ── */
+/* ── Incident Descriptions ── */
 export async function getIncidentDescriptions(clientId = 1, countryId = 101, langId = 1) {
-  const DESC_TTL_MS = 30 * 60 * 1000; // 30 min cache
-  
-  if (_incidentDescCache && Date.now() - _incidentDescCacheTs < DESC_TTL_MS) {
-    return _incidentDescCache;
-  }
-
-  const params = { client_id: clientId, country_id: countryId, lang_id: langId };
-  const data = await postSafeCity("/getIncDesc", params);
-
-  // Normalize descriptions
-  const descriptions = data?.data ?? data ?? [];
-  
-  _incidentDescCache = descriptions;
+  const TTL = 30 * 60 * 1000;
+  if (_incidentDescCache && Date.now() - _incidentDescCacheTs < TTL) return _incidentDescCache;
+  const data = await postSafeCity("/getIncDesc", { client_id: clientId, country_id: countryId, lang_id: langId });
+  _incidentDescCache = data?.data ?? data ?? [];
   _incidentDescCacheTs = Date.now();
-
-  return descriptions;
+  return _incidentDescCache;
 }
 
-/* ── POST /getSafetyDesc - Safety Descriptions ── */
+/* ── Safety Descriptions ── */
 export async function getSafetyDescriptions(clientId = 1, countryId = 101, langId = 1) {
-  const DESC_TTL_MS = 30 * 60 * 1000; // 30 min cache
-  
-  if (_safetyDescCache && Date.now() - _safetyDescCacheTs < DESC_TTL_MS) {
-    return _safetyDescCache;
-  }
-
-  const params = { client_id: clientId, country_id: countryId, lang_id: langId };
-  const data = await postSafeCity("/getSafetyDesc", params);
-
-  // Normalize descriptions
-  const descriptions = data?.data ?? data ?? [];
-  
-  _safetyDescCache = descriptions;
+  const TTL = 30 * 60 * 1000;
+  if (_safetyDescCache && Date.now() - _safetyDescCacheTs < TTL) return _safetyDescCache;
+  const data = await postSafeCity("/getSafetyDesc", { client_id: clientId, country_id: countryId, lang_id: langId });
+  _safetyDescCache = data?.data ?? data ?? [];
   _safetyDescCacheTs = Date.now();
-
-  return descriptions;
+  return _safetyDescCache;
 }
 
-/* ── POST /api/reported-incident/details - Get Incident Details ── */
-export async function getIncidentDetails(incidentId) {
-  if (!incidentId) {
-    throw new Error("Incident ID is required");
-  }
-
-  // Check per-incident cache (5 min TTL)
-  const DETAILS_TTL_MS = 5 * 60 * 1000;
-  if (_incidentDetailsCache[incidentId] && 
-      Date.now() - _incidentDetailsCache[incidentId].ts < DETAILS_TTL_MS) {
-    return _incidentDetailsCache[incidentId].data;
-  }
-
-  const params = { incident_id: incidentId };
-  const data = await postSafeCity("/api/reported-incident/details", params);
-
-  // Normalize incident details
-  const details = {
-    id: incidentId,
-    ...data?.data ?? data,
-    // Common fields normalization
-    description: data?.data?.description ?? data?.data?.incident_text ?? data?.description ?? "",
-    category: data?.data?.category ?? data?.data?.incident_category ?? null,
-    lat: toNumber(data?.data?.lat ?? data?.data?.latitude),
-    lng: toNumber(data?.data?.lng ?? data?.data?.longitude),
-    createdAt: data?.data?.created_at ?? data?.created_at ?? null,
-    verified: data?.data?.verified ?? data?.verified ?? false,
-    anonymous: data?.data?.anonymous ?? true,
-  };
-
-  _incidentDetailsCache[incidentId] = {
-    data: details,
-    ts: Date.now(),
-  };
-
-  return details;
-}
-
-/* ── Get all SafeCity data combined ── */
+/* ── All SafeCity data combined ── */
 export async function getAllSafeCityData(params) {
   const [mapData, categories, incidentDesc, safetyDesc] = await Promise.allSettled([
     getSafeCityMapData(params),
@@ -342,7 +414,6 @@ export async function getAllSafeCityData(params) {
     getIncidentDescriptions(params?.clientId ?? 1, params?.countryId ?? 101, params?.langId ?? 1),
     getSafetyDescriptions(params?.clientId ?? 1, params?.countryId ?? 101, params?.langId ?? 1),
   ]);
-
   return {
     mapData: mapData.status === "fulfilled" ? mapData.value : { incidents: [], clusters: [], heatmap: [] },
     categories: categories.status === "fulfilled" ? categories.value : [],

@@ -1,5 +1,7 @@
 import {
   getSafeCityMapData,
+  getSafeCityNear,
+  getSafeCityAlongRoute,
   getCategories,
   getIncidentDescriptions,
   getSafetyDescriptions,
@@ -83,6 +85,44 @@ export const getIncidentDetailsHandler = async (req, res) => {
   } catch (error) {
     console.error("SafeCity incident details error:", error);
     res.status(500).json({ error: "Failed to fetch incident details", details: error.message });
+  }
+};
+
+/* ── Get nearby SafeCity incidents (geo query) ── */
+export const getNearbyIncidents = async (req, res) => {
+  try {
+    const { lat, lng, radiusKm, limit, city } = req.query;
+    const incidents = await getSafeCityNear({
+      lat: parseFloat(lat) || 18.5204,
+      lng: parseFloat(lng) || 73.8567,
+      radiusKm: parseFloat(radiusKm) || 8,
+      limit: parseInt(limit) || 200,
+      city: city || "Pune",
+    });
+    res.json({ incidents });
+  } catch (error) {
+    console.error("SafeCity near error:", error);
+    res.status(500).json({ error: "Failed to fetch nearby incidents", details: error.message });
+  }
+};
+
+/* ── Get SafeCity incidents along a route ── */
+export const getAlongRouteIncidents = async (req, res) => {
+  try {
+    const { coords, corridorKm, limit, city } = req.body;
+    if (!coords?.length) {
+      return res.status(400).json({ error: "coords array is required" });
+    }
+    const incidents = await getSafeCityAlongRoute({
+      coords,
+      corridorKm: parseFloat(corridorKm) || 1,
+      limit: parseInt(limit) || 300,
+      city: city || "Pune",
+    });
+    res.json({ incidents });
+  } catch (error) {
+    console.error("SafeCity along-route error:", error);
+    res.status(500).json({ error: "Failed to fetch route incidents", details: error.message });
   }
 };
 

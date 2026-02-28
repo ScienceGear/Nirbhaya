@@ -1,6 +1,8 @@
 import express from "express";
 import {
   getMapData,
+  getNearbyIncidents,
+  getAlongRouteIncidents,
   getCategoriesHandler,
   getIncidentDescHandler,
   getSafetyDescHandler,
@@ -16,6 +18,12 @@ safecityRouter.get("/map", getMapData);
 
 // GET /api/safecity/all?lat=18.52&lng=73.85&radiusKm=12&mapZoom=11&city=Pune&client_id=1&country_id=101&lang_id=1
 safecityRouter.get("/all", getAllData);
+
+// GET /api/safecity/near?lat=18.52&lng=73.85&radiusKm=8&limit=200&city=Pune
+safecityRouter.get("/near", getNearbyIncidents);
+
+// POST /api/safecity/along-route  { coords: [[lng,lat],...], corridorKm: 1 }
+safecityRouter.post("/along-route", getAlongRouteIncidents);
 
 /* ── Category endpoints ── */
 // GET /api/safecity/categories?lang_id=1
