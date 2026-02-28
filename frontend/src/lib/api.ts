@@ -398,6 +398,31 @@ export interface SafeCityIncident {
   timestamp: string;
   anonymous: boolean;
   severity: number;
+  // Rich fields from SafeCity
+  categories?: string;
+  location?: string;
+  dateText?: string;
+  timeText?: string;
+  age?: string;
+  gender?: string;
+}
+
+export interface SafeCityIncidentDetails {
+  id: string | number;
+  description: string;
+  category: string;
+  categories: string;
+  lat: number;
+  lng: number;
+  location: string;
+  dateText: string;
+  timeText: string;
+  age: string;
+  gender: string;
+  createdAt: string;
+  verified: boolean;
+  anonymous: boolean;
+  [key: string]: any; // raw fields from SafeCity
 }
 
 export interface SafeCityCluster {
@@ -531,9 +556,9 @@ export async function getSafeCitySafetyDescriptions(params?: {
 /**
  * Get specific incident details from SafeCity
  */
-export async function getSafeCityIncidentDetails(incidentId: number | string): Promise<any> {
+export async function getSafeCityIncidentDetails(incidentId: number | string): Promise<SafeCityIncidentDetails | null> {
   try {
-    return await request<any>("/api/safecity/incident-details", {
+    return await request<SafeCityIncidentDetails>("/api/safecity/incident-details", {
       method: "POST",
       body: JSON.stringify({ incident_id: incidentId }),
     });

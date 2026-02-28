@@ -68,6 +68,18 @@ function normalizeIncident(item, index) {
     toNumber(item?.severity) ||
     (toNumber(item?.count) && toNumber(item?.count) > 8 ? 3 : 2);
 
+  // Build comma-separated category string from categories array or string
+  let categories = "";
+  if (Array.isArray(item?.categories)) {
+    categories = item.categories.map((c) => c?.name ?? c?.category_name ?? c).filter(Boolean).join(" | ");
+  } else if (typeof item?.categories === "string") {
+    categories = item.categories;
+  } else if (item?.category) {
+    categories = String(item.category);
+  } else if (item?.incident_category) {
+    categories = String(item.incident_category);
+  }
+
   return {
     id: String(item?.id ?? `sc-incident-${index}`),
     type: "unsafe_area",
@@ -77,6 +89,13 @@ function normalizeIncident(item, index) {
     timestamp: item?.created_at || item?.timestamp || new Date().toISOString(),
     anonymous: true,
     severity: Math.min(3, Math.max(1, Math.round(severity))),
+    // Rich fields from SafeCity
+    categories,
+    location: item?.location || item?.place || item?.city || "",
+    dateText: item?.date || item?.incident_date || "",
+    timeText: item?.time || item?.incident_time || "",
+    age: item?.age || item?.person_age || "",
+    gender: item?.gender || item?.person_gender || "",
   };
 }
 
@@ -97,7 +116,7 @@ function normalizeCluster(item, index) {
 
 function dedupeByCoordinate(items) {
   const seen = new Set();
-  return items.filter((item) => {
+-  return items.filter((item) => {
     const key = `${item.lat.toFixed(5)}:${item.lng.toFixed(5)}`;
     if (seen.has(key)) return false;
     seen.add(key);

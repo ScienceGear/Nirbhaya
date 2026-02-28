@@ -24,14 +24,13 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, Polygon, useM
 import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, type MapReport, type HexZoneData } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, getSafeCityIncidentDetails, type MapReport, type HexZoneData, type SafeCityIncident, type SafeCityIncidentDetails } from "@/lib/api";
 import { cellToBoundary } from "h3-js";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 
 /* ─── Travel mode types ──────────────────────────────────────────────────── */
 type TravelMode = "foot" | "car" | "bike";
-const OSRM_PROFILE: Record<TravelMode, string> = { foot: "foot", car: "car", bike: "bike" };
-const MODE_SPEED_KMH: Record<TravelMode, number> = { foot: 5, car: 30, bike: 15 };
+const MODE_SPEED_KMH: Record<TravelMode, number> = { foot: 5, car: 40, bike: 15 };
 const MODE_LABELS: Record<TravelMode, string> = { foot: "Walking", car: "Car", bike: "Bike" };
 
 /* ─── Google Maps API config ─────────────────────────────────────────────── */
@@ -371,7 +370,8 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
 }
 
 /* ── Extract turn-by-turn steps from OSRM response ── */
-function extractSteps(route: any): Array<{ instruction: string; distance: number; duration: number; location: [number, number] }> {
+/* ── Extract turn-by-turn steps from OSRM response, scaled to travel mode speed ── */
+function extractSteps(route: any, speedScale = 1): Array<{ instruction: string; distance: number; duration: number; location: [number, number] }> {
   const steps: Array<{ instruction: string; distance: number; duration: number; location: [number, number] }> = [];
   if (!route?.legs) return steps;
   for (const leg of route.legs) {
@@ -383,7 +383,7 @@ function extractSteps(route: any): Array<{ instruction: string; distance: number
       steps.push({
         instruction: instruction.charAt(0).toUpperCase() + instruction.slice(1),
         distance: step.distance || 0,
-        duration: step.duration || 0,
+        duration: (step.duration || 0) * speedScale,
         location: maneuver.location || [0, 0],
       });
     }
@@ -521,22 +521,29 @@ async function fetchRealRoutes(
     const adjustedRsi = Math.max(20, BASE_RSI[Math.min(i, 2)] - routePenalty);
     const reasons = [...REASONS[Math.min(i, 2)]];
     if (routePenalty >= 5) reasons.push("Community reports near this area lowered RSI");
+    // Recalculate duration from actual distance using the selected travel mode speed
+    // (OSRM public server only has the driving profile, so raw.duration is always car-speed)
+    const distKm = raw.distance / 1000;
+    const modeDurationMin = Math.max(1, Math.round((distKm / MODE_SPEED_KMH[mode]) * 60));
+    // Scale step durations: ratio of mode time to OSRM car time
+    const osrmDurationSec = raw.duration || 1;
+    const speedScale = (modeDurationMin * 60) / osrmDurationSec;
     return {
       id: `r${i + 1}`,
       name: NAMES[Math.min(i, 2)],
       type: TYPES[Math.min(i, 2)],
       rsi: adjustedRsi,
-      duration: `${Math.max(1, Math.round(raw.duration / 60))} min`,
-      distance: `${(raw.distance / 1000).toFixed(1)} km`,
+      duration: `${modeDurationMin} min`,
+      distance: `${distKm.toFixed(1)} km`,
       color: COLOR[Math.min(i, 2)],
       reasons,
       coordinates: coords,
-      steps: extractSteps(raw),
+      steps: extractSteps(raw, speedScale),
       checkpoints: generateCheckpoints(coords, policeStations, MODE_SPEED_KMH[mode]),
     } as RouteOption & { steps?: any[] };
   };
 
-  const profile = OSRM_PROFILE[mode];
+  const profile = "car"; // Public OSRM only supports driving; we recalculate duration per mode
 
   // Step 1: Try direct OSRM call with alternatives
   const directRoutes = await osrmFetch([s, e], true, profile);
@@ -1144,6 +1151,188 @@ function IncidentMarkerLayer({ reports }: { reports: MapReport[] }) {
   );
 }
 
+/* ── SafeCity incident markers with rich popups ── */
+const SVG_SAFECITY = `<circle cx="12" cy="12" r="10" stroke-width="0" fill="none"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`;
+
+function SafeCityIncidentMarkerLayer({
+  incidents,
+  onViewDetails,
+}: {
+  incidents: SafeCityIncident[];
+  onViewDetails: (incident: SafeCityIncident) => void;
+}) {
+  const zoom = useMapZoom();
+  const icon = useMemo(() => makeZoomIcon("#dc2626", SVG_SAFECITY, zoom), [zoom]);
+  if (zoom < 11 || !incidents.length) return null;
+  return (
+    <>
+      {incidents.map((inc) => {
+        const dateStr = inc.dateText || (inc.timestamp ? new Date(inc.timestamp).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "");
+        return (
+          <Marker key={`sc-inc-${inc.id}`} position={[inc.lat, inc.lng]} icon={icon}>
+            <Popup>
+              <div style={{ minWidth: 220, maxWidth: 280, fontFamily: "system-ui, sans-serif" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <span style={{ background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, letterSpacing: 0.5 }}>SafeCity</span>
+                  <span style={{ color: "#6b7280", fontSize: 11 }}>#{inc.id}</span>
+                </div>
+                {inc.categories && (
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#1f2937", marginBottom: 4 }}>
+                    <span style={{ color: "#6b7280", fontWeight: 400 }}>Type: </span>
+                    #{inc.id} {inc.categories}
+                  </div>
+                )}
+                {inc.location && (
+                  <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 2 }}>
+                    <span style={{ fontWeight: 500 }}>Location: </span>{inc.location}
+                  </div>
+                )}
+                {(dateStr || inc.timeText) && (
+                  <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 6 }}>
+                    <span style={{ fontWeight: 500 }}>Date & Time: </span>
+                    {dateStr}{inc.timeText ? ` between ${inc.timeText}` : ""}
+                  </div>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onViewDetails(inc); }}
+                  style={{
+                    display: "block", width: "100%", marginTop: 4, padding: "5px 0",
+                    background: "#dc2626", color: "#fff", border: "none", borderRadius: 4,
+                    fontSize: 12, fontWeight: 600, cursor: "pointer", textAlign: "center",
+                  }}
+                >
+                  View more details
+                </button>
+              </div>
+            </Popup>
+          </Marker>
+        );
+      })}
+    </>
+  );
+}
+
+/* ── SafeCity Incident Detail Modal ── */
+function SafeCityDetailModal({
+  incident,
+  details,
+  loading,
+  onClose,
+}: {
+  incident: SafeCityIncident | null;
+  details: SafeCityIncidentDetails | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  if (!incident) return null;
+
+  const data = details || incident;
+  const categories = details?.categories || details?.category || incident.categories || "";
+  const description = details?.description || incident.description || "";
+  const location = details?.location || (incident as any).location || "";
+  const dateText = details?.dateText || details?.date || (details as any)?.incident_date || incident.dateText || "";
+  const timeText = details?.timeText || details?.time || (details as any)?.incident_time || incident.timeText || "";
+  const age = details?.age || (details as any)?.person_age || (incident as any).age || "";
+  const gender = details?.gender || (details as any)?.person_gender || (incident as any).gender || "";
+  const dateFormatted = dateText || (incident.timestamp ? new Date(incident.timestamp).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : "");
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+        style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ scale: 0.9, opacity: 0, y: 20 }}
+          animate={{ scale: 1, opacity: 1, y: 0 }}
+          exit={{ scale: 0.9, opacity: 0, y: 20 }}
+          transition={{ type: "spring", damping: 25, stiffness: 300 }}
+          className="rounded-xl shadow-2xl max-w-md w-full overflow-hidden"
+          style={{ background: "var(--background, #fff)", color: "var(--foreground, #1f2937)" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-5 py-4 border-b" style={{ borderColor: "var(--border, #e5e7eb)" }}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                  <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400" />
+                </div>
+                <div>
+                  <div className="font-semibold text-sm">{categories || "Incident Report"}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {age && `${age} Yrs`}{age && gender && " | "}{gender}
+                  </div>
+                </div>
+              </div>
+              <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Body */}
+          <div className="px-5 py-4 space-y-3">
+            {loading ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="w-6 h-6 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
+                <span className="ml-2 text-sm text-muted-foreground">Loading details...</span>
+              </div>
+            ) : (
+              <>
+                {/* Description */}
+                {description && description !== "Reported incident" && (
+                  <p className="text-sm leading-relaxed" style={{ color: "var(--foreground, #374151)" }}>
+                    {description}
+                  </p>
+                )}
+
+                {/* Meta info */}
+                <div className="space-y-2 text-sm">
+                  {location && (
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                      <span>{location}</span>
+                    </div>
+                  )}
+                  {dateFormatted && (
+                    <div className="flex items-start gap-2">
+                      <svg className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+                      </svg>
+                      <span>Around {dateFormatted}</span>
+                    </div>
+                  )}
+                  {timeText && (
+                    <div className="flex items-start gap-2">
+                      <svg className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      <span>Between {timeText}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Source badge */}
+                <div className="flex items-center gap-2 pt-2 border-t" style={{ borderColor: "var(--border, #e5e7eb)" }}>
+                  <span className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 font-medium">
+                    SafeCity Report #{incident.id}
+                  </span>
+                  <span className="text-xs text-muted-foreground">via webapp.safecity.in</span>
+                </div>
+              </>
+            )}
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
 /* ── Zoom-aware safe zone markers — different icons per type ── */
 function SafeZoneLayer({ zones }: { zones: typeof safeZones }) {
   const zoom = useMapZoom();
@@ -1531,6 +1720,24 @@ export default function Dashboard() {
   const [showShareModal, setShowShareModal] = useState(false);
   const [navMode, setNavMode] = useState(false);
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
+
+  // SafeCity incident detail modal state
+  const [safeCityDetailIncident, setSafeCityDetailIncident] = useState<SafeCityIncident | null>(null);
+  const [safeCityDetails, setSafeCityDetails] = useState<SafeCityIncidentDetails | null>(null);
+  const [safeCityDetailLoading, setSafeCityDetailLoading] = useState(false);
+  const [showSafeCityMarkers, setShowSafeCityMarkers] = useState(true);
+
+  const handleViewSafeCityDetails = useCallback(async (inc: SafeCityIncident) => {
+    setSafeCityDetailIncident(inc);
+    setSafeCityDetails(null);
+    setSafeCityDetailLoading(true);
+    try {
+      const details = await getSafeCityIncidentDetails(inc.id);
+      setSafeCityDetails(details);
+    } catch { /* ignore */ }
+    setSafeCityDetailLoading(false);
+  }, []);
+
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
   const [userHeading, setUserHeading] = useState(0);
   const lastUserLocRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -1847,6 +2054,28 @@ export default function Dashboard() {
     }
   };
 
+  // Auto-refetch routes when travel mode changes (if user already searched)
+  const prevTravelMode = useRef(travelMode);
+  useEffect(() => {
+    if (prevTravelMode.current === travelMode) return;
+    prevTravelMode.current = travelMode;
+    if (!hasSearched || !routes.length) return;
+    const s = originLoc || resolveLocation2(origin);
+    const e = destLoc   || resolveLocation2(destination);
+    if (!s || !e) return;
+    let cancelled = false;
+    setIsSearching(true);
+    fetchGoogleMapsRoutes(s, e, mapIncidents, travelMode).then((gen) => {
+      if (cancelled) return;
+      setRoutes(gen);
+      setSelectedRoute(gen[0]);
+      setExpandedRouteId(gen[0]?.id ?? null);
+    }).finally(() => {
+      if (!cancelled) setIsSearching(false);
+    });
+    return () => { cancelled = true; };
+  }, [travelMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const navigateToStation = useCallback(async (name: string, lat: number, lng: number) => {
     const loc: DemoLocation = { name, lat, lng };
     setDestination(name);
@@ -2029,6 +2258,14 @@ export default function Dashboard() {
 
           {/* Real user-reported incidents on map — zoom-aware */}
           {showIncidents && <IncidentMarkerLayer reports={realReports} />}
+
+          {/* SafeCity incident markers — clickable with rich popups */}
+          {showSafeCityMarkers && (
+            <SafeCityIncidentMarkerLayer
+              incidents={mapIncidents as SafeCityIncident[]}
+              onViewDetails={handleViewSafeCityDetails}
+            />
+          )}
 
           {/* Police stations — clustered, hidden when zoomed out */}
           {showPolice && <PoliceClusterLayer stations={stationData} onNavigateTo={navigateToStation} />}
@@ -2260,6 +2497,7 @@ export default function Dashboard() {
                         { label: "Hex Zones",  Icon: Layers,        on: showHexLayer,  fn: () => setShowHexLayer ((v) => !v) },
                         { label: "Heatmap",    Icon: Layers,        on: showHeatmap,   fn: () => setShowHeatmap  ((v) => !v) },
                         { label: "Incidents",  Icon: AlertTriangle, on: showIncidents, fn: () => setShowIncidents((v) => !v) },
+                        { label: "SafeCity",   Icon: MapPin,        on: showSafeCityMarkers, fn: () => setShowSafeCityMarkers((v) => !v) },
                         { label: "Police",     Icon: Shield,        on: showPolice,    fn: () => setShowPolice   ((v) => !v) },
                         { label: "Safe Zones", Icon: ShieldCheck,   on: showSafeZones, fn: () => setShowSafeZones((v) => !v) },
                         { label: "Hotspots",   Icon: Activity,      on: showHotspots,  fn: () => setShowHotspots ((v) => !v) },
@@ -2609,6 +2847,16 @@ export default function Dashboard() {
             <ShareModal origin={origin} destination={destination} onClose={() => setShowShareModal(false)} />
           )}
         </AnimatePresence>
+
+        {/* SafeCity Incident Detail Modal */}
+        {safeCityDetailIncident && (
+          <SafeCityDetailModal
+            incident={safeCityDetailIncident}
+            details={safeCityDetails}
+            loading={safeCityDetailLoading}
+            onClose={() => { setSafeCityDetailIncident(null); setSafeCityDetails(null); }}
+          />
+        )}
 
         {/* AI Safety Assistant chatbot */}
         <AISafetyAssistant />
