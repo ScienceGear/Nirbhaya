@@ -2953,7 +2953,7 @@ export default function Dashboard() {
 
         {!navMode && <div
           className={isMobile
-            ? "fixed bottom-0 left-0 right-0 z-[500]"
+            ? "fixed bottom-[calc(3.5rem+max(env(safe-area-inset-bottom),0px))] left-0 right-0 z-[500]"
             : "absolute left-3 top-3 z-[500] flex flex-col gap-2 w-[340px]"}
           style={isMobile ? {} : { maxHeight: "calc(100dvh - 80px)", overflowY: "visible", overflowX: "visible" }}
         >
@@ -2997,7 +2997,7 @@ export default function Dashboard() {
                 >
                   <div
                     className={isMobile ? "overflow-y-auto overscroll-contain" : ""}
-                    style={isMobile ? { maxHeight: "62dvh", paddingBottom: "env(safe-area-inset-bottom, 12px)" } : {}}
+                    style={isMobile ? { maxHeight: "55dvh", paddingBottom: "env(safe-area-inset-bottom, 12px)" } : {}}
                   >
                   <div className="px-4 pb-4 space-y-2.5 border-t border-border">
                     {/* Origin */}
