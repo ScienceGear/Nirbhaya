@@ -12,6 +12,7 @@ import { useI18n } from "@/lib/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getReports, getUserPoints, submitReport } from "@/lib/api";
 import DashboardNav from "@/components/DashboardNav";
+import GuestBanner from "@/components/GuestBanner";
 import { useAuth } from "@/lib/auth";
 
 export default function ReportPage() {
@@ -29,6 +30,7 @@ export default function ReportPage() {
   const [imageDataUrl, setImageDataUrl] = useState("");
   const [lastPoints, setLastPoints] = useState(0);
   const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState("");
 
   const { data: reportData } = useQuery({ queryKey: ["reports"], queryFn: getReports });
   const { data: pointsData } = useQuery({
@@ -75,26 +77,31 @@ export default function ReportPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await submitMutation.mutateAsync({
-      type: type || "unsafe_area",
-      description: desc,
-      location,
-      anonymous,
-      lat: lat ?? undefined,
-      lng: lng ?? undefined,
-      areaRating,
-      imageUrl: imageDataUrl || undefined,
-      reporterId,
-    });
-    setSubmitted(true);
-    setTimeout(() => setSubmitted(false), 3000);
-    setType("");
-    setDesc("");
-    setLocation("");
-    setLat(null);
-    setLng(null);
-    setImageDataUrl("");
-    setAreaRating(3);
+    setSubmitError("");
+    try {
+      await submitMutation.mutateAsync({
+        type: type || "unsafe_area",
+        description: desc,
+        location,
+        anonymous,
+        lat: lat ?? undefined,
+        lng: lng ?? undefined,
+        areaRating,
+        imageUrl: imageDataUrl || undefined,
+        reporterId,
+      });
+      setSubmitted(true);
+      setTimeout(() => setSubmitted(false), 3000);
+      setType("");
+      setDesc("");
+      setLocation("");
+      setLat(null);
+      setLng(null);
+      setImageDataUrl("");
+      setAreaRating(3);
+    } catch (err: any) {
+      setSubmitError(err?.message || "Failed to submit report. Please try again.");
+    }
   };
 
   const severityLabel = (s: number) =>
@@ -106,6 +113,7 @@ export default function ReportPage() {
     <div className="min-h-[100dvh] flex bg-background">
       <DashboardNav />
       <main className="flex-1 overflow-y-auto pb-24 md:pb-6">
+        <GuestBanner />
 
         {/* Hero header */}
         <div className="w-full px-4 md:px-8 pt-5 pb-4 border-b border-border/50 bg-gradient-to-r from-primary/5 via-background to-background">
@@ -237,6 +245,14 @@ export default function ReportPage() {
                 )}
               </Button>
 
+              {submitError && (
+                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-center">
+                  <p className="text-sm text-red-500 font-medium flex items-center justify-center gap-2">
+                    <AlertTriangle className="h-4 w-4" /> {submitError}
+                  </p>
+                </motion.div>
+              )}
+
               {submitted && (
                 <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-center">
                   <p className="text-sm text-emerald-500 font-medium flex items-center justify-center gap-2">
@@ -299,7 +315,7 @@ export default function ReportPage() {
                       <div className="flex items-start justify-between gap-2 mb-1">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sv.cls}`}>{sv.label}</span>
-                          <span className="text-[11px] font-medium capitalize text-foreground/80">{inc.type.replace(/_/g, " ")}</span>
+                          <span className="text-[11px] font-medium capitalize text-foreground/80">{(inc.type || "report").replace(/_/g, " ")}</span>
                         </div>
                         {inc.anonymous && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0">Anon</span>

@@ -1,4 +1,5 @@
-import { useRef, useState, useEffect } from "react";
+﻿import { useRef, useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Sun, Moon, Globe, Bell, Shield, User, Trophy, Camera, Users, Copy, Check, Eye, MapPin, Navigation, AlertTriangle, BatteryMedium, Activity, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,8 +16,15 @@ import DashboardNav from "@/components/DashboardNav";
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
   const { lang, setLang, t } = useI18n();
-  const { user } = useAuth();
+  const { user, isGuest } = useAuth();
+  const nav = useNavigate();
   const reporterId = user?.email || "guest";
+  const role = user?.role || "user";
+
+  // Block guests from Settings
+  useEffect(() => {
+    if (isGuest && !user) nav("/login", { replace: true });
+  }, [isGuest, user, nav]);
 
   const [notifications, setNotifications] = useState(true);
   const [proximityAlerts, setProximityAlerts] = useState(true);
@@ -26,7 +34,7 @@ export default function SettingsPage() {
   const pfpRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
 
-  // Sharing preferences (synced with backend)
+  // Sharing preferences (synced with backend) — only for regular users
   const defaultPrefs: SharingPrefs = { location: true, routeInfo: true, sosAlerts: true, batteryLevel: true, checkpoints: true, incidentReports: false };
   const [sharingPrefs, setSharingPrefs] = useState<SharingPrefs>(user?.sharingPrefs || defaultPrefs);
   const [savingPrefs, setSavingPrefs] = useState(false);
@@ -56,6 +64,7 @@ export default function SettingsPage() {
   const { data: pointsData } = useQuery({
     queryKey: ["user-points", reporterId],
     queryFn: () => getUserPoints(reporterId),
+    enabled: role === "user",
   });
 
   const handlePfpChange = (file: File | undefined) => {
@@ -76,16 +85,32 @@ export default function SettingsPage() {
   return (
     <div className="min-h-[100dvh] flex bg-background">
       <DashboardNav />
-      <main className="flex-1 overflow-y-auto px-3 md:px-6 pt-4 pb-24 md:pb-10">
-      <div className="container mx-auto max-w-xl space-y-5">
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="text-center">
-          <h1 className="font-display text-2xl font-bold">{t("nav.settings")}</h1>
-        </motion.div>
+      <main className="flex-1 overflow-y-auto pb-24 md:pb-6">
 
-        {/* Profile card */}
+      {/* Hero */}
+      <div className="relative overflow-hidden bg-gradient-to-b from-pink-950/40 via-background to-background px-4 md:px-8 pt-6 pb-5">
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[200px] bg-pink-600/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="relative flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-pink-500/20 flex items-center justify-center">
+            <Shield className="h-5 w-5 text-pink-400" />
+          </div>
+          <div>
+            <h1 className="font-display text-xl font-bold">{t("nav.settings")}</h1>
+            <p className="text-xs text-muted-foreground">
+              {role === "admin" ? "Platform settings & preferences" : role === "guardian" ? "Guardian preferences" : "Manage your profile, preferences & privacy"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 md:px-8 py-5 space-y-5">
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div className="space-y-5">
+
+        {/* Profile card — all roles */}
         {user && (
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft flex items-center gap-4">
-            {/* Avatar */}
             <div className="relative shrink-0">
               <div className="h-16 w-16 rounded-full bg-primary/10 overflow-hidden flex items-center justify-center">
                 {pfp ? (
@@ -112,30 +137,34 @@ export default function SettingsPage() {
             <div className="flex-1 min-w-0">
               <h3 className="font-semibold truncate">{user.name}</h3>
               <p className="text-xs text-muted-foreground truncate">{user.email}</p>
-              <span className="inline-block mt-1 text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                {(user as any).role === "guardian" ? "Guardian" : "User"}
+              <span className={`inline-block mt-1 text-[11px] px-2 py-0.5 rounded-full font-bold capitalize ${
+                role === "admin" ? "bg-violet-500/10 text-violet-500" : role === "guardian" ? "bg-blue-500/10 text-blue-500" : "bg-emerald-500/10 text-emerald-500"
+              }`}>
+                {role}
               </span>
             </div>
           </div>
         )}
 
-        {/* Community points */}
-        <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-500/10 to-orange-500/5 border border-amber-500/20 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Trophy className="h-6 w-6 text-amber-500 shrink-0" />
-            <div>
-              <p className="text-sm font-semibold">Community Points</p>
-              <p className="text-xs text-muted-foreground">Earn by reporting incidents & rating areas</p>
+        {/* Community points — user only */}
+        {role === "user" && (
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-500/10 to-orange-500/5 border border-amber-500/20 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Trophy className="h-6 w-6 text-amber-500 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold">Community Points</p>
+                <p className="text-xs text-muted-foreground">Earn by reporting incidents & rating areas</p>
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              <p className={`text-xl font-bold ${tierColor}`}>{totalPoints}</p>
+              <p className={`text-[11px] font-semibold ${tierColor}`}>{tier} Tier</p>
             </div>
           </div>
-          <div className="text-right shrink-0">
-            <p className={`text-xl font-bold ${tierColor}`}>{totalPoints}</p>
-            <p className={`text-[11px] font-semibold ${tierColor}`}>{tier} Tier</p>
-          </div>
-        </div>
+        )}
 
         <div className="space-y-3">
-          {/* Theme */}
+          {/* Theme — all roles */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -149,7 +178,7 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Language */}
+          {/* Language — all roles */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -172,19 +201,32 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Notifications */}
+          {/* Notifications — all roles */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-3">
             <div className="flex items-center gap-3">
               <Bell className="h-4 w-4 text-primary" />
               <p className="font-medium text-sm">Notifications & Alerts</p>
             </div>
             <div className="space-y-3 pl-7">
-              {([
-                { label: "Push Notifications", state: notifications, set: setNotifications },
-                { label: "Proximity Alerts", state: proximityAlerts, set: setProximityAlerts },
-                { label: "Voice SOS Always-on", state: voiceSOS, set: setVoiceSOS },
-                { label: "Low Battery Alert", state: batteryAlerts, set: setBatteryAlerts },
-              ] as const).map(({ label, state, set }) => (
+              {(role === "admin"
+                ? [
+                    { label: "Push Notifications", state: notifications, set: setNotifications },
+                    { label: "New Report Alerts", state: proximityAlerts, set: setProximityAlerts },
+                    { label: "SOS Alert Notifications", state: batteryAlerts, set: setBatteryAlerts },
+                  ]
+                : role === "guardian"
+                  ? [
+                      { label: "Push Notifications", state: notifications, set: setNotifications },
+                      { label: "SOS Alerts", state: proximityAlerts, set: setProximityAlerts },
+                      { label: "Low Battery Alerts", state: batteryAlerts, set: setBatteryAlerts },
+                    ]
+                  : [
+                      { label: "Push Notifications", state: notifications, set: setNotifications },
+                      { label: "Proximity Alerts", state: proximityAlerts, set: setProximityAlerts },
+                      { label: "Voice SOS Always-on", state: voiceSOS, set: setVoiceSOS },
+                      { label: "Low Battery Alert", state: batteryAlerts, set: setBatteryAlerts },
+                    ]
+              ).map(({ label, state, set }) => (
                 <div key={label} className="flex items-center justify-between">
                   <Label className="text-sm text-muted-foreground">{label}</Label>
                   <Switch checked={state} onCheckedChange={set as any} />
@@ -192,9 +234,14 @@ export default function SettingsPage() {
               ))}
             </div>
           </div>
+        </div>
+        </div>
 
-          {/* Guardian Link Code */}
-          {user && (
+        {/* RIGHT COLUMN */}
+        <div className="space-y-5">
+
+          {/* Guardian Link Code — user only */}
+          {role === "user" && user && (
             <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
               <div className="flex items-center gap-3 mb-2">
                 <Users className="h-4 w-4 text-primary" />
@@ -217,40 +264,74 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {/* Data Sharing Preferences */}
-          <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-3">
-            <div className="flex items-center gap-3">
-              <Eye className="h-4 w-4 text-primary" />
-              <div>
-                <p className="font-medium text-sm">Data Sharing with Guardians</p>
-                <p className="text-xs text-muted-foreground">Control what your guardians can see</p>
-              </div>
-              {savingPrefs && <span className="ml-auto text-[10px] text-muted-foreground animate-pulse">Saving…</span>}
-            </div>
-            <div className="space-y-3 pl-7">
-              {([
-                { key: "location" as const, label: "Live Location", icon: MapPin, desc: "Your real-time GPS position" },
-                { key: "routeInfo" as const, label: "Route Info", icon: Navigation, desc: "Current navigation route & RSI" },
-                { key: "sosAlerts" as const, label: "SOS Alerts", icon: AlertTriangle, desc: "Emergency SOS events" },
-                { key: "batteryLevel" as const, label: "Battery Level", icon: BatteryMedium, desc: "Phone battery percentage" },
-                { key: "checkpoints" as const, label: "Checkpoints", icon: Activity, desc: "Route checkpoint progress" },
-                { key: "incidentReports" as const, label: "Incident Reports", icon: FileText, desc: "Reports you have filed" },
-              ]).map(({ key, label, icon: Icon, desc }) => (
-                <div key={key} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Icon className="h-3.5 w-3.5 text-muted-foreground" />
-                    <div>
-                      <Label className="text-sm">{label}</Label>
-                      <p className="text-[10px] text-muted-foreground">{desc}</p>
-                    </div>
-                  </div>
-                  <Switch checked={sharingPrefs[key]} onCheckedChange={() => togglePref(key)} />
+          {/* Data Sharing — user only */}
+          {role === "user" && (
+            <div className="p-4 rounded-2xl bg-card border border-border shadow-soft space-y-3">
+              <div className="flex items-center gap-3">
+                <Eye className="h-4 w-4 text-primary" />
+                <div>
+                  <p className="font-medium text-sm">Data Sharing with Guardians</p>
+                  <p className="text-xs text-muted-foreground">Control what your guardians can see</p>
                 </div>
-              ))}
+                {savingPrefs && <span className="ml-auto text-[10px] text-muted-foreground animate-pulse">Saving…</span>}
+              </div>
+              <div className="space-y-3 pl-7">
+                {([
+                  { key: "location" as const, label: "Live Location", icon: MapPin, desc: "Your real-time GPS position" },
+                  { key: "routeInfo" as const, label: "Route Info", icon: Navigation, desc: "Current navigation route & RSI" },
+                  { key: "sosAlerts" as const, label: "SOS Alerts", icon: AlertTriangle, desc: "Emergency SOS events" },
+                  { key: "batteryLevel" as const, label: "Battery Level", icon: BatteryMedium, desc: "Phone battery percentage" },
+                  { key: "checkpoints" as const, label: "Checkpoints", icon: Activity, desc: "Route checkpoint progress" },
+                  { key: "incidentReports" as const, label: "Incident Reports", icon: FileText, desc: "Reports you have filed" },
+                ]).map(({ key, label, icon: Icon, desc }) => (
+                  <div key={key} className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+                      <div>
+                        <Label className="text-sm">{label}</Label>
+                        <p className="text-[10px] text-muted-foreground">{desc}</p>
+                      </div>
+                    </div>
+                    <Switch checked={sharingPrefs[key]} onCheckedChange={() => togglePref(key)} />
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* About */}
+          {/* Admin platform info */}
+          {role === "admin" && (
+            <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
+              <div className="flex items-center gap-3 mb-2">
+                <Shield className="h-4 w-4 text-violet-500" />
+                <div>
+                  <p className="font-medium text-sm">Platform Administration</p>
+                  <p className="text-xs text-muted-foreground">You have full admin access to the Nirbhaya platform</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2 pl-7">
+                Use the Admin Dashboard to view reports, manage users, and analyze safety data with AI.
+              </p>
+            </div>
+          )}
+
+          {/* Guardian info */}
+          {role === "guardian" && (
+            <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
+              <div className="flex items-center gap-3 mb-2">
+                <Shield className="h-4 w-4 text-blue-500" />
+                <div>
+                  <p className="font-medium text-sm">Guardian Mode</p>
+                  <p className="text-xs text-muted-foreground">You are monitoring linked users' safety</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2 pl-7">
+                Use the Guardian Dashboard to link users, view their locations, and monitor SOS alerts.
+              </p>
+            </div>
+          )}
+
+          {/* About — all roles */}
           <div className="p-4 rounded-2xl bg-card border border-border shadow-soft">
             <div className="flex items-center gap-3">
               <Shield className="h-4 w-4 text-primary" />
@@ -261,6 +342,7 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+      </div>
       </div>
       </main>
     </div>

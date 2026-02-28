@@ -5,6 +5,7 @@ import authRouter from './routes/auth.routes.js';
 import hexRouter from './routes/hex.route.js';
 import reportRouter from './routes/report.routes.js';
 import navigationRouter from './routes/navigation.route.js';
+import safecityRouter from './routes/safecity.routes.js';
 import dotenv from 'dotenv';
 import { server, app } from './library/socket.js';
 import { connectdb } from './library/db.js';
@@ -39,6 +40,7 @@ app.use("/api/tracker",trackerRouter);
 app.use("/api/auth",authRouter);
 app.use("/api/hex",hexRouter);
 app.use("/api/report", reportRouter);
+app.use("/api/safecity", safecityRouter);
 app.use("/api", navigationRouter);
 
 server.listen(PORT, () => {

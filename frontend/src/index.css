@@ -150,3 +150,11 @@
     @apply bg-card/80 backdrop-blur-xl border border-border/50;
   }
 }
+
+/* Force Leaflet map background to neutral color even in dark mode */
+.leaflet-container {
+  background: #e8e4dc !important;
+}
+.leaflet-tile-pane {
+  background: #e8e4dc;
+}

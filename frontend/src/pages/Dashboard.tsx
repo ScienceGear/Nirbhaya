@@ -6,6 +6,7 @@ import {
   Home, Map, Siren, FileWarning, Settings, Sun, Moon, LogOut, Star,
   User, ChevronDown, ChevronUp, X, Share2, ShieldCheck,
   Activity, Crosshair, ArrowUp, CornerUpRight, LocateFixed, Locate, BatteryLow,
+  Car, Bike, Footprints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import AISafetyAssistant from "@/components/AISafetyAssistant";
@@ -18,12 +19,20 @@ import { useTheme } from "@/lib/theme";
 import { useAuth } from "@/lib/auth";
 import SOSButton from "@/components/SOSButton";
 import DashboardNav from "@/components/DashboardNav";
-import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet";
+import GuestBanner from "@/components/GuestBanner";
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, Polygon, useMap } from "react-leaflet";
 import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getCrowdHeatmap, getMapOverview, updateLocation } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, type MapReport, type HexZoneData } from "@/lib/api";
+import { cellToBoundary } from "h3-js";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
+
+/* ─── Travel mode types ──────────────────────────────────────────────────── */
+type TravelMode = "foot" | "car" | "bike";
+const OSRM_PROFILE: Record<TravelMode, string> = { foot: "foot", car: "car", bike: "bike" };
+const MODE_SPEED_KMH: Record<TravelMode, number> = { foot: 5, car: 30, bike: 15 };
+const MODE_LABELS: Record<TravelMode, string> = { foot: "Walking", car: "Car", bike: "Bike" };
 
 /* ─── Google Maps API config ─────────────────────────────────────────────── */
 setOptions({ apiKey: "AIzaSyBHQJgdFNDxvNZeeDp9sbQGWW7eFn1arm0", version: "weekly" });
@@ -35,25 +44,44 @@ L.Icon.Default.mergeOptions({
   iconUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png",
   shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png",
 });
+/* ── SVG paths for map icons ── */
+const SVG_SHIELD = `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>`;
+const SVG_WARNING = `<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`;
+const SVG_HOSPITAL = `<path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2z"/><line x1="12" y1="6" x2="12" y2="18"/><line x1="6" y1="12" x2="18" y2="12"/>`;
+const SVG_CHECK = `<polyline points="20 6 9 17 4 12"/>`;
+const SVG_BUILDING = `<rect x="4" y="2" width="16" height="20" rx="2"/><line x1="9" y1="6" x2="9" y2="6.01"/><line x1="15" y1="6" x2="15" y2="6.01"/><line x1="9" y1="10" x2="9" y2="10.01"/><line x1="15" y1="10" x2="15" y2="10.01"/><line x1="9" y1="14" x2="9" y2="14.01"/><line x1="15" y1="14" x2="15" y2="14.01"/><line x1="9" y1="18" x2="15" y2="18"/>`;
+const SVG_FIRE = `<path d="M8.5 14.5A2.5 2.5 0 0011 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 11-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 002.5 2.5z"/>`;
+
+/** Build an icon with zoom-adaptive size. Below zoom-threshold it's a tiny dot. */
+function makeZoomIcon(color: string, svgPath: string, zoom: number): L.DivIcon {
+  const sz = zoom >= 17 ? 34 : zoom >= 15 ? 26 : zoom >= 13 ? 18 : zoom >= 11 ? 12 : 7;
+  const bw = sz >= 24 ? 2.5 : sz >= 14 ? 2 : 1;
+  const svgSz = Math.max(Math.round(sz * 0.48), 6);
+  if (sz <= 10) {
+    return L.divIcon({
+      className: "",
+      html: `<div style="background:${color};width:${sz}px;height:${sz}px;border-radius:50%;border:${bw}px solid rgba(255,255,255,.85);box-shadow:0 1px 3px rgba(0,0,0,.3);transition:width .15s,height .15s"></div>`,
+      iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2],
+    });
+  }
+  return L.divIcon({
+    className: "",
+    html: `<div style="display:flex;align-items:center;justify-content:center;width:${sz}px;height:${sz}px;border-radius:50%;background:${color};border:${bw}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.38);transition:width .15s,height .15s">
+      <svg xmlns="http://www.w3.org/2000/svg" width="${svgSz}" height="${svgSz}" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${svgPath}</svg>
+    </div>`,
+    iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2],
+  });
+}
+
+/** Simple colored circle for start/end markers (no zoom scaling needed) */
 const makeIcon = (color: string) =>
   L.divIcon({
     className: "",
     html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35)"></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    iconSize: [18, 18], iconAnchor: [9, 9],
   });
-const policeIconNew = L.divIcon({
-  className: "",
-  html: `<div style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:#1d4ed8;border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.4)">
-    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      <path d="M12 8v4"/><path d="M12 16h.01"/>
-    </svg>
-  </div>`,
-  iconSize: [32, 32],
-  iconAnchor: [16, 16],
-});
-const incidentIconNew = makeIcon("#ef4444");
+
+/** Static icons for route endpoints */
 const safeIconNew = makeIcon("#22c55e");
 const destIconNew = makeIcon("#f43f5e");
 
@@ -290,10 +318,11 @@ function LocationInput({
 async function osrmFetch(
   waypoints: { lat: number; lng: number }[],
   alternatives: boolean = false,
+  profile: string = "foot",
 ): Promise<any[]> {
   const coords = waypoints.map((w) => `${w.lng},${w.lat}`).join(";");
   const url =
-    `https://router.project-osrm.org/route/v1/foot/${coords}` +
+    `https://router.project-osrm.org/route/v1/${profile}/${coords}` +
     `?overview=full&geometries=geojson&steps=true${alternatives ? "&alternatives=true" : ""}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -366,7 +395,7 @@ function extractSteps(route: any): Array<{ instruction: string; distance: number
 function generateCheckpoints(
   coords: [number, number][],
   stationData: typeof policeStations,
-  walkSpeedKmH = 5,
+  speedKmH = 5,
 ): RouteCheckpoint[] {
   if (coords.length < 2) return [];
 
@@ -445,7 +474,7 @@ function generateCheckpoints(
     type: p.type,
     lat: p.lat,
     lng: p.lng,
-    eta: `${Math.max(1, Math.round((p.distAlongRoute / walkSpeedKmH) * 60))} min`,
+    eta: `${Math.max(1, Math.round((p.distAlongRoute / speedKmH) * 60))} min`,
     passed: false,
   }));
 }
@@ -455,6 +484,7 @@ async function fetchRealRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
   incidentData: Array<{ lat: number; lng: number; severity: number; areaRating?: number }> = [],
+  mode: TravelMode = "foot",
 ): Promise<RouteOption[]> {
   const computeRoutePenalty = (coords: [number, number][]) => {
     if (!incidentData.length || !coords.length) return 0;
@@ -502,12 +532,14 @@ async function fetchRealRoutes(
       reasons,
       coordinates: coords,
       steps: extractSteps(raw),
-      checkpoints: generateCheckpoints(coords, policeStations),
+      checkpoints: generateCheckpoints(coords, policeStations, MODE_SPEED_KMH[mode]),
     } as RouteOption & { steps?: any[] };
   };
 
+  const profile = OSRM_PROFILE[mode];
+
   // Step 1: Try direct OSRM call with alternatives
-  const directRoutes = await osrmFetch([s, e], true);
+  const directRoutes = await osrmFetch([s, e], true, profile);
   const collected: any[] = [...directRoutes];
 
   // Step 2: If we don't have 3 routes yet, generate waypoint-offset routes on real roads
@@ -516,7 +548,7 @@ async function fetchRealRoutes(
     for (const factor of offsets) {
       if (collected.length >= 3) break;
       const via = offsetWaypoint(s, e, factor);
-      const viaRoutes = await osrmFetch([s, via, e], false);
+      const viaRoutes = await osrmFetch([s, via, e], false, profile);
       if (viaRoutes.length > 0) {
         // Check it's actually different from existing routes (> 200m divergence)
         const isDifferent = collected.every((existing) => {
@@ -542,7 +574,7 @@ async function fetchRealRoutes(
       name: NAMES[i],
       type,
       rsi: BASE_RSI[i],
-      duration: `${Math.max(1, Math.round(haversineKm(s.lat, s.lng, e.lat, e.lng) / 5 * 60))} min`,
+      duration: `${Math.max(1, Math.round(haversineKm(s.lat, s.lng, e.lat, e.lng) / MODE_SPEED_KMH[mode] * 60))} min`,
       distance: `${haversineKm(s.lat, s.lng, e.lat, e.lng).toFixed(1)} km`,
       color: COLOR[i],
       reasons: REASONS[i],
@@ -576,9 +608,10 @@ async function analyzeRoutesWithAI(
   }>,
   origin: string,
   destination: string,
+  modeLabel: string = "walking",
 ): Promise<AIRouteAnalysis[]> {
   const prompt = `You are a women's safety routing AI for Pune, India.
-Analyze these ${routes.length} route alternatives from "${origin}" to "${destination}" and return a safety score for each.
+Analyze these ${routes.length} ${modeLabel} route alternatives from "${origin}" to "${destination}" and return a safety score for each.
 
 Route data:
 ${routes.map((r, i) =>
@@ -639,6 +672,7 @@ async function fetchGoogleMapsRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
   incidentData: Array<{ lat: number; lng: number; severity: number }> = [],
+  mode: TravelMode = "foot",
 ): Promise<RouteOption[]> {
   const COLOR_MAP = { safe: "#22c55e", moderate: "#f59e0b", risky: "#ef4444" };
   const FALLBACK_COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
@@ -674,7 +708,7 @@ async function fetchGoogleMapsRoutes(
   };
 
   // Step 1 — Get real OSRM road geometry
-  let rawRoutes = await fetchRealRoutes(s, e, incidentData);
+  let rawRoutes = await fetchRealRoutes(s, e, incidentData, mode);
 
   // Step 2 — Build stats per route for AI
   const routeStats = rawRoutes.map((r) => {
@@ -689,9 +723,18 @@ async function fetchGoogleMapsRoutes(
   });
 
   // Step 3 — Ask AI to analyze and score
-  const originName = `${s.lat.toFixed(4)},${s.lng.toFixed(4)}`;
-  const destName   = `${e.lat.toFixed(4)},${e.lng.toFixed(4)}`;
-  const aiResults  = await analyzeRoutesWithAI(routeStats, originName, destName);
+  // Reverse-geocode origin & destination for AI context (non-blocking)
+  let originName = `${s.lat.toFixed(4)},${s.lng.toFixed(4)}`;
+  let destName   = `${e.lat.toFixed(4)},${e.lng.toFixed(4)}`;
+  try {
+    const [oName, dName] = await Promise.all([
+      reverseGeocode(s.lat, s.lng),
+      reverseGeocode(e.lat, e.lng),
+    ]);
+    if (oName) originName = oName;
+    if (dName) destName = dName;
+  } catch { /* keep coordinate fallback */ }
+  const aiResults  = await analyzeRoutesWithAI(routeStats, originName, destName, MODE_LABELS[mode]);
 
   // Step 4 — Merge AI analysis back into routes
   return rawRoutes.map((r, i) => {
@@ -1035,7 +1078,7 @@ function useMapZoom() {
   return zoom;
 }
 
-/* ── Police cluster layer — hidden when zoomed out beyond level 11 ── */
+/* ── Police cluster layer — hidden when zoomed out, icons scale with zoom ── */
 function PoliceClusterLayer({
   stations,
   onNavigateTo,
@@ -1044,7 +1087,8 @@ function PoliceClusterLayer({
   onNavigateTo: (name: string, lat: number, lng: number) => void;
 }) {
   const zoom = useMapZoom();
-  if (zoom < 11) return null;
+  if (zoom < 10) return null;
+  const icon = useMemo(() => makeZoomIcon("#1d4ed8", SVG_SHIELD, zoom), [zoom]);
   return (
     <MarkerClusterGroup
       chunkedLoading
@@ -1059,7 +1103,7 @@ function PoliceClusterLayer({
       }}
     >
       {stations.map((ps) => (
-        <Marker key={ps.id} position={[ps.lat, ps.lng]} icon={policeIconNew}>
+        <Marker key={ps.id} position={[ps.lat, ps.lng]} icon={icon}>
           <Popup>
             <div className="p-1 min-w-[160px]">
               <p className="font-semibold text-blue-700 text-sm">{ps.name}</p>
@@ -1077,6 +1121,59 @@ function PoliceClusterLayer({
       ))}
     </MarkerClusterGroup>
   );
+}
+
+/* ── Zoom-aware incident markers ── */
+function IncidentMarkerLayer({ reports }: { reports: MapReport[] }) {
+  const zoom = useMapZoom();
+  const icon = useMemo(() => makeZoomIcon("#ef4444", SVG_WARNING, zoom), [zoom]);
+  if (zoom < 9) return null;
+  return (
+    <>
+      {reports.map((r) => (
+        <Marker key={`report-${r._id}`} position={[r.latitude, r.longitude]} icon={icon}>
+          <Popup>
+            <strong className="block text-sm capitalize">{r.incidentType?.replace(/_/g, " ") || "Report"}</strong>
+            <span className="text-xs">{r.description || "No description"}</span><br />
+            <span className={`text-xs font-semibold ${r.severity === "High" ? "text-red-500" : r.severity === "Medium" ? "text-amber-500" : "text-emerald-500"}`}>{r.severity}</span>
+            <span className="text-xs text-gray-400 ml-2">{r.timestamp ? new Date(r.timestamp).toLocaleDateString() : ""}</span>
+          </Popup>
+        </Marker>
+      ))}
+    </>
+  );
+}
+
+/* ── Zoom-aware safe zone markers — different icons per type ── */
+function SafeZoneLayer({ zones }: { zones: typeof safeZones }) {
+  const zoom = useMapZoom();
+  const icons = useMemo(() => ({
+    police: makeZoomIcon("#3b82f6", SVG_SHIELD, zoom),
+    hospital: makeZoomIcon("#22c55e", SVG_HOSPITAL, zoom),
+    commercial: makeZoomIcon("#f59e0b", SVG_BUILDING, zoom),
+    default: makeZoomIcon("#22c55e", SVG_CHECK, zoom),
+  }), [zoom]);
+  if (zoom < 10) return null;
+  return (
+    <>
+      {zones.map((z, i) => (
+        <Marker key={`sz-${i}`} position={[z.lat, z.lng]} icon={icons[z.type as keyof typeof icons] || icons.default}>
+          <Popup>
+            <strong className="block text-sm">{z.name}</strong>
+            <span className="text-xs capitalize">{z.type}</span>
+            <br /><span className="text-xs text-emerald-600 font-medium">Safety Score: {z.safety}/100</span>
+          </Popup>
+        </Marker>
+      ))}
+    </>
+  );
+}
+
+/* ── Zoom gate helper — hides children below minZoom ── */
+function ZoomGate({ minZoom, children }: { minZoom: number; children: React.ReactNode }) {
+  const zoom = useMapZoom();
+  if (zoom < minZoom) return null;
+  return <>{children}</>;
 }
 function NavMapController({
   userLoc,
@@ -1243,6 +1340,45 @@ function NavigationPanel({
             </button>
           </div>
 
+          {/* Checkpoint progress */}
+          {route.checkpoints && route.checkpoints.length > 0 && (
+            <div className="bg-muted/30 rounded-xl p-2.5 mb-2 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Checkpoints</p>
+                <p className="text-[10px] font-bold text-primary">
+                  {route.checkpoints.filter((c) => c.passed).length}/{route.checkpoints.length}
+                </p>
+              </div>
+              <div className="flex gap-1">
+                {route.checkpoints.map((cp, i) => (
+                  <div
+                    key={i}
+                    className={`h-1.5 flex-1 rounded-full transition-colors ${
+                      cp.passed ? "bg-emerald-500" : "bg-muted-foreground/20"
+                    }`}
+                  />
+                ))}
+              </div>
+              <div className="space-y-1 max-h-24 overflow-y-auto">
+                {route.checkpoints.map((cp, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <div className={`h-2 w-2 rounded-full flex-shrink-0 ${
+                      cp.passed ? "bg-emerald-500" :
+                      cp.type === "police" ? "bg-blue-500" :
+                      cp.type === "hospital" ? "bg-red-400" : "bg-amber-400"
+                    }`} />
+                    <span className={`text-[10px] flex-1 truncate ${cp.passed ? "line-through text-muted-foreground" : "font-medium"}`}>{cp.name}</span>
+                    {cp.passed ? (
+                      <span className="text-[9px] text-emerald-500 font-semibold">✓</span>
+                    ) : (
+                      <span className="text-[9px] text-muted-foreground">~{cp.eta}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {steps && steps.length > 0 && (
             <>
               <button
@@ -1376,6 +1512,7 @@ export default function Dashboard() {
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
+  const [travelMode, setTravelMode] = useState<TravelMode>("foot");
   const [panelOpen, setPanelOpen] = useState(true);
   const [showPolice, setShowPolice] = useState(true);
   const [showIncidents, setShowIncidents] = useState(true);
@@ -1421,6 +1558,56 @@ export default function Dashboard() {
     }),
     staleTime: 2 * 60 * 1000,
   });
+
+  // Real user reports for the map (no mock data)
+  const { data: realReports = [] } = useQuery({
+    queryKey: ["map-real-reports"],
+    queryFn: getAllReportsForMap,
+    staleTime: 2 * 60 * 1000,
+  });
+
+  // Hex zones — fetched from backend
+  const [showHexLayer, setShowHexLayer] = useState(true);
+  const hexQueryLat = userLoc?.lat ?? PUNE_CENTER[1];
+  const hexQueryLng = userLoc?.lng ?? PUNE_CENTER[0];
+  const { data: hexZones = [] } = useQuery({
+    queryKey: ["hex-zones", hexQueryLat.toFixed(3), hexQueryLng.toFixed(3)],
+    queryFn: () => getHexZones(hexQueryLat, hexQueryLng),
+    staleTime: 3 * 60 * 1000,
+  });
+
+  // Convert hex IDs to polygon boundaries — show ALL hexes (green=safe, colored=danger)
+  const hexPolygons = useMemo(() => {
+    return hexZones
+      .map((h) => {
+        try {
+          const boundary = cellToBoundary(h.hexId, true); // [lng, lat][]
+          const positions = boundary.map((c) => [c[1], c[0]] as [number, number]); // swap to [lat, lng] for Leaflet
+          return { hexId: h.hexId, dangerScore: h.dangerScore, positions };
+        } catch { return null; }
+      })
+      .filter(Boolean) as Array<{ hexId: string; dangerScore: number; positions: [number, number][] }>;
+  }, [hexZones]);
+
+  // Area safety rating near user
+  const nearbyRating = useMemo(() => {
+    if (!realReports.length) return null;
+    const lat = userLoc?.lat ?? PUNE_CENTER[1];
+    const lng = userLoc?.lng ?? PUNE_CENTER[0];
+    const nearby = realReports.filter((r) => {
+      const d = Math.sqrt((r.latitude - lat) ** 2 + (r.longitude - lng) ** 2);
+      return d < 0.02; // ~2km
+    });
+    if (!nearby.length) return { score: 5, label: "Safe", count: 0 };
+    const avgRating = nearby.reduce((s, r) => s + (r.areaRating || 3), 0) / nearby.length;
+    const highCount = nearby.filter((r) => r.severity === "High").length;
+    const score = Math.max(1, Math.round(avgRating - highCount * 0.5));
+    return {
+      score,
+      label: score >= 4 ? "Safe" : score >= 3 ? "Moderate" : "Unsafe",
+      count: nearby.length,
+    };
+  }, [realReports, userLoc]);
 
   const mapIncidents = overview?.incidents ?? [];
   const mapClusters = overview?.clusters ?? [];
@@ -1523,32 +1710,93 @@ export default function Dashboard() {
     };
   }, []);
 
-  /* Sync location to backend every 30s for guardian visibility */
+  /* Sync location to backend — 10s interval + immediate on nav changes */
+  const navStartTimeRef = useRef<Date | null>(null);
+
+  const buildLocationPayload = useCallback((overrideNavMode?: boolean) => {
+    const loc = lastUserLocRef.current;
+    if (!loc) return null;
+    const isNav = overrideNavMode ?? navMode;
+    return {
+      lat: loc.lat,
+      lng: loc.lng,
+      accuracy: userLoc?.accuracy,
+      batteryLevel: batteryLevel ?? undefined,
+      isNavigating: isNav,
+      currentRoute: isNav && selectedRoute
+        ? {
+            origin: origin || "Current Location",
+            destination: destination || "",
+            rsi: selectedRoute.rsi,
+            eta: selectedRoute.duration,
+            distance: selectedRoute.distance,
+          }
+        : undefined,
+      checkpointsPassed: isNav ? selectedRoute?.checkpoints?.filter((c) => c.passed).length : 0,
+      checkpointsTotal: isNav ? selectedRoute?.checkpoints?.length : 0,
+      checkpoints: isNav ? selectedRoute?.checkpoints?.map((c) => ({
+        name: c.name,
+        type: c.type,
+        lat: c.lat,
+        lng: c.lng,
+        eta: c.eta,
+        passed: !!c.passed,
+      })) : [],
+    };
+  }, [navMode, selectedRoute, origin, destination, batteryLevel, userLoc]);
+
+  // Track checkpoint count separately for stable dependency
+  const cpPassedCount = selectedRoute?.checkpoints?.filter((c) => c.passed).length ?? 0;
+
+  // Send immediately when navMode changes or checkpoints are ticked
+  useEffect(() => {
+    const payload = buildLocationPayload();
+    if (payload) updateLocation(payload).catch(() => {});
+    // Track nav start time
+    if (navMode) navStartTimeRef.current = new Date();
+  }, [navMode, cpPassedCount]);
+
+  // Periodic sync every 10 seconds
   useEffect(() => {
     const iv = setInterval(() => {
-      const loc = lastUserLocRef.current;
-      if (!loc) return;
+      const payload = buildLocationPayload();
+      if (payload) updateLocation(payload).catch(() => {});
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [buildLocationPayload]);
+
+  // End navigation handler — saves trip + clears state + sends update
+  const handleEndNavigation = useCallback(() => {
+    // Save trip history if there was a route
+    if (selectedRoute) {
+      saveTripHistory({
+        origin: origin || "Current Location",
+        destination: destination || "",
+        rsi: selectedRoute.rsi,
+        eta: selectedRoute.duration,
+        distance: selectedRoute.distance,
+        checkpoints: selectedRoute.checkpoints?.map((c) => ({
+          name: c.name, type: c.type, passed: !!c.passed,
+        })),
+        startedAt: navStartTimeRef.current?.toISOString(),
+      }).catch(() => {});
+    }
+
+    // Clear nav state and immediately push to backend
+    setNavMode(false);
+    // Explicit immediate update with isNavigating: false
+    const loc = lastUserLocRef.current;
+    if (loc) {
       updateLocation({
         lat: loc.lat,
         lng: loc.lng,
         accuracy: userLoc?.accuracy,
         batteryLevel: batteryLevel ?? undefined,
-        isNavigating: navMode,
-        currentRoute: selectedRoute
-          ? {
-              origin: origin || "Current Location",
-              destination: destination || "",
-              rsi: selectedRoute.rsi,
-              eta: selectedRoute.duration,
-              distance: selectedRoute.distance,
-            }
-          : undefined,
-        checkpointsPassed: selectedRoute?.checkpoints?.filter((c) => c.passed).length,
-        checkpointsTotal: selectedRoute?.checkpoints?.length,
+        isNavigating: false,
       }).catch(() => {});
-    }, 30000);
-    return () => clearInterval(iv);
-  }, [navMode, selectedRoute, batteryLevel, userLoc]);
+    }
+    navStartTimeRef.current = null;
+  }, [selectedRoute, origin, destination, userLoc, batteryLevel]);
 
   /* Real deviation check: if user is > 150m from closest point on the selected route */
   useEffect(() => {
@@ -1587,7 +1835,7 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchGoogleMapsRoutes(s, e, mapIncidents);
+      const gen = await fetchGoogleMapsRoutes(s, e, mapIncidents, travelMode);
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setHasSearched(true);
@@ -1608,7 +1856,7 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchGoogleMapsRoutes(s, loc, mapIncidents);
+      const gen = await fetchGoogleMapsRoutes(s, loc, mapIncidents, travelMode);
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setHasSearched(true);
@@ -1618,7 +1866,7 @@ export default function Dashboard() {
     } finally {
       setIsSearching(false);
     }
-  }, [originLoc, userLoc, origin, mapIncidents]);
+  }, [originLoc, userLoc, origin, mapIncidents, travelMode]);
 
   const pickRoute = (r: RouteOption) => {
     setSelectedRoute(r);
@@ -1637,9 +1885,12 @@ export default function Dashboard() {
         <MapContainer
           center={mapCenter}
           zoom={13}
+          minZoom={3}
+          maxZoom={18}
           className="h-full w-full"
           zoomControl={false}
           scrollWheelZoom
+          style={{ background: "#e8e4dc" }}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -1673,122 +1924,144 @@ export default function Dashboard() {
             </>
           )}
 
-          {/* Heatmap visualization */}
-          {showHeatmap && mapIncidents.map((inc) => {
-            const color = inc.severity === 3 ? "#ef4444" : inc.severity === 2 ? "#f97316" : "#f59e0b";
-            const radius = inc.severity === 3 ? 260 : inc.severity === 2 ? 200 : 150;
-            return (
-              <Circle
-                key={`heat-inc-${inc.id}`}
-                center={[inc.lat, inc.lng]}
-                radius={radius}
-                pathOptions={{ color, fillColor: color, fillOpacity: 0.12, weight: 0 }}
-              />
-            );
-          })}
-          {showHeatmap && mapHeat.map((point, i) => {
-            const radius = Math.round(130 + point.weight * 260);
-            return (
-              <Circle
-                key={`heat-live-${i}`}
-                center={[point.lat, point.lng]}
-                radius={radius}
-                pathOptions={{ color: "#dc2626", fillColor: "#dc2626", fillOpacity: 0.06, weight: 0 }}
-              />
-            );
-          })}
-          {showHeatmap && mapClusters.map((cluster) => (
-            <Circle
-              key={`heat-cluster-${cluster.id}`}
-              center={[cluster.lat, cluster.lng]}
-              radius={Math.round(180 + Math.min(cluster.count, 25) * 22)}
-              pathOptions={{ color: "#b91c1c", fillColor: "#b91c1c", fillOpacity: 0.1, weight: 0 }}
-            >
-              <Popup>
-                <strong className="block text-sm">SafeCity Cluster</strong>
-                <span className="text-xs text-muted-foreground">Incidents in area: {cluster.count}</span>
-              </Popup>
-            </Circle>
-          ))}
-          {showHeatmap && (crowdHeat?.points || []).map((point) => {
-            const color = point.busyPct >= 70 ? "#dc2626" : point.busyPct >= 45 ? "#f97316" : "#2563eb";
-            const radius = Math.round(140 + point.weight * 300);
-            return (
-              <Circle
-                key={`heat-crowd-${point.id}`}
-                center={[point.lat, point.lng]}
-                radius={radius}
-                pathOptions={{ color, fillColor: color, fillOpacity: 0.11, weight: 0 }}
-              >
-                <Popup>
-                  <strong className="block text-sm">Crowd (hour {crowdHeat?.hour}:00)</strong>
-                  <span className="text-xs text-muted-foreground">Estimated busy: {point.busyPct}%</span>
-                </Popup>
-              </Circle>
-            );
-          })}
-          {showHeatmap && crimeHotspots.map((h, i) => (
-            <Circle
-              key={`heat-hot-${i}`}
-              center={[h.lat, h.lng]}
-              radius={420}
-              pathOptions={{
-                color: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
-                fillColor: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
-                fillOpacity: 0.08,
-                weight: 0,
-              }}
-            />
-          ))}
+          {/* Heatmap visualization — hidden below zoom 11 to prevent opacity stacking */}
+          {showHeatmap && (
+            <ZoomGate minZoom={11}>
+              {mapIncidents.map((inc) => {
+                const color = inc.severity === 3 ? "#ef4444" : inc.severity === 2 ? "#f97316" : "#f59e0b";
+                const radius = inc.severity === 3 ? 260 : inc.severity === 2 ? 200 : 150;
+                return (
+                  <Circle
+                    key={`heat-inc-${inc.id}`}
+                    center={[inc.lat, inc.lng]}
+                    radius={radius}
+                    pathOptions={{ color, fillColor: color, fillOpacity: 0.12, weight: 0 }}
+                  />
+                );
+              })}
+              {mapHeat.map((point, i) => {
+                const radius = Math.round(130 + point.weight * 260);
+                return (
+                  <Circle
+                    key={`heat-live-${i}`}
+                    center={[point.lat, point.lng]}
+                    radius={radius}
+                    pathOptions={{ color: "#dc2626", fillColor: "#dc2626", fillOpacity: 0.06, weight: 0 }}
+                  />
+                );
+              })}
+              {mapClusters.map((cluster) => (
+                <Circle
+                  key={`heat-cluster-${cluster.id}`}
+                  center={[cluster.lat, cluster.lng]}
+                  radius={Math.round(180 + Math.min(cluster.count, 25) * 22)}
+                  pathOptions={{ color: "#b91c1c", fillColor: "#b91c1c", fillOpacity: 0.1, weight: 0 }}
+                >
+                  <Popup>
+                    <strong className="block text-sm">SafeCity Cluster</strong>
+                    <span className="text-xs text-muted-foreground">Incidents in area: {cluster.count}</span>
+                  </Popup>
+                </Circle>
+              ))}
+              {(crowdHeat?.points || []).map((point) => {
+                const color = point.busyPct >= 70 ? "#dc2626" : point.busyPct >= 45 ? "#f97316" : "#2563eb";
+                const radius = Math.round(140 + point.weight * 300);
+                return (
+                  <Circle
+                    key={`heat-crowd-${point.id}`}
+                    center={[point.lat, point.lng]}
+                    radius={radius}
+                    pathOptions={{ color, fillColor: color, fillOpacity: 0.11, weight: 0 }}
+                  >
+                    <Popup>
+                      <strong className="block text-sm">Crowd (hour {crowdHeat?.hour}:00)</strong>
+                      <span className="text-xs text-muted-foreground">Estimated busy: {point.busyPct}%</span>
+                    </Popup>
+                  </Circle>
+                );
+              })}
+              {crimeHotspots.map((h, i) => (
+                <Circle
+                  key={`heat-hot-${i}`}
+                  center={[h.lat, h.lng]}
+                  radius={420}
+                  pathOptions={{
+                    color: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
+                    fillColor: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
+                    fillOpacity: 0.08,
+                    weight: 0,
+                  }}
+                />
+              ))}
+            </ZoomGate>
+          )}
+
+          {/* H3 Hexagon Safety Layer — visible from zoom 10+ */}
+          {showHexLayer && (
+            <ZoomGate minZoom={10}>
+              {hexPolygons.map((hex) => {
+                const maxScore = 15;
+                const norm = hex.dangerScore <= 0 ? 0 : Math.min(hex.dangerScore / maxScore, 1);
+                const color = norm === 0 ? "#22c55e" : norm > 0.7 ? "#ef4444" : norm > 0.4 ? "#f97316" : norm > 0.15 ? "#fbbf24" : "#86efac";
+                const ratingLabel = norm === 0 ? "Safe Zone" : norm > 0.7 ? "High Risk" : norm > 0.4 ? "Moderate Risk" : norm > 0.15 ? "Low Risk" : "Safe";
+                const fillOpacity = norm === 0 ? 0.08 : 0.15 + norm * 0.25;
+                return (
+                  <Polygon
+                    key={`hex-${hex.hexId}`}
+                    positions={hex.positions}
+                    pathOptions={{
+                      color,
+                      fillColor: color,
+                      fillOpacity,
+                      weight: 1,
+                      opacity: norm === 0 ? 0.3 : 0.5,
+                    }}
+                  >
+                    <Popup>
+                      <strong className="block text-sm">{ratingLabel}</strong>
+                      <span className="text-xs text-muted-foreground">Danger Score: {hex.dangerScore}</span>
+                    </Popup>
+                  </Polygon>
+                );
+              })}
+            </ZoomGate>
+          )}
+
+          {/* Real user-reported incidents on map — zoom-aware */}
+          {showIncidents && <IncidentMarkerLayer reports={realReports} />}
 
           {/* Police stations — clustered, hidden when zoomed out */}
           {showPolice && <PoliceClusterLayer stations={stationData} onNavigateTo={navigateToStation} />}
 
-          {/* Safe zones — police stations, hospitals, commercial */}
-          {showSafeZones && safeZones.map((z, i) => {
-            const color = z.type === "police" ? "#3b82f6" : z.type === "hospital" ? "#22c55e" : "#f59e0b";
-            return (
-              <Marker key={`sz-${i}`} position={[z.lat, z.lng]} icon={makeIcon(color)}>
-                <Popup>
-                  <strong className="block text-sm">{z.name}</strong>
-                  <span className="text-xs capitalize">{z.type}</span>
-                  <br /><span className="text-xs text-emerald-600 font-medium">Safety Score: {z.safety}/100</span>
-                </Popup>
-              </Marker>
-            );
-          })}
+          {/* Safe zones — zoom-aware with type-specific icons */}
+          {showSafeZones && <SafeZoneLayer zones={safeZones} />}
 
-          {/* Crime hotspots — pulsing circles */}
-          {showHotspots && crimeHotspots.map((h, i) => (
-            <Circle key={`hs-${i}`}
-              center={[h.lat, h.lng]}
-              radius={350}
-              pathOptions={{
-                color: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
-                fillColor: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
-                fillOpacity: 0.25,
-                weight: 2,
-                dashArray: "6 4",
-              }}
-            >
-              <Popup>
-                <strong className="block text-sm text-red-600">⚠️ {h.name}</strong>
-                <p className="text-xs">Danger: {h.danger}/100 · Incidents: {h.incidents}</p>
-                <ul className="text-xs mt-1 space-y-0.5">{h.issues.map((iss) => <li key={iss}>• {iss}</li>)}</ul>
-              </Popup>
-            </Circle>
-          ))}
+          {/* Crime hotspots — pulsing circles, hidden below zoom 11 */}
+          {showHotspots && (
+            <ZoomGate minZoom={11}>
+              {crimeHotspots.map((h, i) => (
+                <Circle key={`hs-${i}`}
+                  center={[h.lat, h.lng]}
+                  radius={350}
+                  pathOptions={{
+                    color: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
+                    fillColor: h.danger >= 90 ? "#ef4444" : h.danger >= 80 ? "#f97316" : "#f59e0b",
+                    fillOpacity: 0.25,
+                    weight: 2,
+                    dashArray: "6 4",
+                  }}
+                >
+                  <Popup>
+                    <strong className="block text-sm text-red-600">⚠️ {h.name}</strong>
+                    <p className="text-xs">Danger: {h.danger}/100 · Incidents: {h.incidents}</p>
+                    <ul className="text-xs mt-1 space-y-0.5">{h.issues.map((iss) => <li key={iss}>• {iss}</li>)}</ul>
+                  </Popup>
+                </Circle>
+              ))}
+            </ZoomGate>
+          )}
 
-          {/* Incidents */}
-          {showIncidents && mapIncidents.map((inc) => (
-            <Marker key={inc.id} position={[inc.lat, inc.lng]} icon={incidentIconNew}>
-              <Popup>
-                <strong className="block text-sm capitalize">{inc.type.replace("_", " ")}</strong>
-                <span className="text-xs">{inc.description}</span><br />
-                <span className="text-xs text-gray-400">{new Date(inc.timestamp).toLocaleDateString()}</span>
-              </Popup>
-            </Marker>
-          ))}
+          {/* Old mock incidents removed — using realReports above */}
 
           {/* All routes (dim inactive, bright active) */}
           {routes.map((r) => (
@@ -1852,7 +2125,7 @@ export default function Dashboard() {
             route={selectedRoute}
             userLoc={userLoc}
             destination={destination}
-            onEndNavigation={() => setNavMode(false)}
+            onEndNavigation={handleEndNavigation}
             onSOS={() => setShowEmergencyModal(true)}
           />
         )}
@@ -1905,11 +2178,18 @@ export default function Dashboard() {
                         <button
                           type="button"
                           className="flex items-center gap-1.5 text-[11px] text-primary font-medium hover:underline pl-1"
-                          onClick={() => {
+                          onClick={async () => {
                             if (userLoc) {
-                              setOrigin("Your Location");
-                              setOriginLoc({ name: "Your Location", lat: userLoc.lat, lng: userLoc.lng });
+                              setOrigin("Detecting location…");
                               setSearchError("");
+                              try {
+                                const placeName = await reverseGeocode(userLoc.lat, userLoc.lng);
+                                setOrigin(placeName);
+                                setOriginLoc({ name: placeName, lat: userLoc.lat, lng: userLoc.lng });
+                              } catch {
+                                setOrigin("Your Location");
+                                setOriginLoc({ name: "Your Location", lat: userLoc.lat, lng: userLoc.lng });
+                              }
                             } else {
                               setSearchError("Getting your location…");
                             }
@@ -1934,6 +2214,28 @@ export default function Dashboard() {
                       userLoc={userLoc}
                     />
 
+                    {/* Travel mode selector */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] text-muted-foreground font-medium shrink-0">Mode:</span>
+                      {([
+                        { mode: "foot" as TravelMode, label: "Walking", Icon: Footprints },
+                        { mode: "bike" as TravelMode, label: "Bike",    Icon: Bike },
+                        { mode: "car"  as TravelMode, label: "Car",     Icon: Car },
+                      ]).map(({ mode, label, Icon }) => (
+                        <button
+                          key={mode}
+                          onClick={() => setTravelMode(mode)}
+                          className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
+                            travelMode === mode
+                              ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                              : "bg-muted text-muted-foreground border-border hover:border-primary/50"
+                          }`}
+                        >
+                          <Icon className="h-3 w-3" /> {label}
+                        </button>
+                      ))}
+                    </div>
+
                     {searchError && (
                       <p className="text-xs text-red-500 flex items-center gap-1">
                         <AlertTriangle className="h-3 w-3 shrink-0" /> {searchError}
@@ -1955,6 +2257,7 @@ export default function Dashboard() {
                     {/* Layer chips */}
                     <div className="flex flex-wrap gap-1.5">
                       {([
+                        { label: "Hex Zones",  Icon: Layers,        on: showHexLayer,  fn: () => setShowHexLayer ((v) => !v) },
                         { label: "Heatmap",    Icon: Layers,        on: showHeatmap,   fn: () => setShowHeatmap  ((v) => !v) },
                         { label: "Incidents",  Icon: AlertTriangle, on: showIncidents, fn: () => setShowIncidents((v) => !v) },
                         { label: "Police",     Icon: Shield,        on: showPolice,    fn: () => setShowPolice   ((v) => !v) },
@@ -1989,10 +2292,13 @@ export default function Dashboard() {
             className="rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated overflow-y-auto"
             style={{ maxHeight: "calc(100dvh - 320px)" }}
           >
-            <div className="px-4 pt-3 pb-1 border-b border-border">
+            <div className="px-4 pt-3 pb-1 border-b border-border flex items-center justify-between">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Route Options
               </p>
+              <span className="text-[10px] font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+                {MODE_LABELS[travelMode]}
+              </span>
             </div>
 
             <div className="px-3 py-2 space-y-1.5">
@@ -2131,16 +2437,18 @@ export default function Dashboard() {
 
         {/* ── Area RSI Panel (right side) ───────────────────────────────── */}
         {!navMode && userLoc && (() => {
-          // Compute dynamic area RSI from nearby incidents, hotspots, safe zones
+          // Compute dynamic area RSI from nearby reports, hotspots, safe zones
+          const nearReports   = realReports.filter((r) => haversineKm(userLoc.lat, userLoc.lng, r.latitude, r.longitude) < 2);
           const nearIncidents = mapIncidents.filter((inc) => haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 2);
           const nearHotspots  = crimeHotspots.filter((h) => haversineKm(userLoc.lat, userLoc.lng, h.lat, h.lng) < 2);
           const nearSafe      = safeZones.filter((z) => haversineKm(userLoc.lat, userLoc.lng, z.lat, z.lng) < 2);
           const nearPolice    = stationData.filter((ps) => haversineKm(userLoc.lat, userLoc.lng, ps.lat, ps.lng) < 2);
 
+          const reportPenalty  = nearReports.reduce((s, r) => s + (r.severity === "High" ? 5 : r.severity === "Medium" ? 3 : 1), 0);
           const incidentPenalty = nearIncidents.reduce((s, inc) => s + (inc.severity || 1) * 2, 0);
           const hotspotPenalty  = nearHotspots.reduce((s, h) => s + h.danger / 25, 0);
           const safeBonus       = nearSafe.length * 3 + nearPolice.length * 4;
-          const rawScore        = Math.max(10, Math.min(100, 75 - incidentPenalty - hotspotPenalty + safeBonus));
+          const rawScore        = Math.max(10, Math.min(100, 75 - reportPenalty - incidentPenalty - hotspotPenalty + safeBonus));
           const areaRsi         = Math.round(rawScore);
 
           const areaName = (() => {
@@ -2178,8 +2486,8 @@ export default function Dashboard() {
                 {/* Stats grid */}
                 <div className="grid grid-cols-2 gap-1.5">
                   <div className="p-1.5 rounded-lg bg-muted/50 text-center">
-                    <div className="text-xs font-bold">{nearIncidents.length}</div>
-                    <div className="text-[9px] text-muted-foreground">Incidents</div>
+                    <div className="text-xs font-bold">{nearReports.length}</div>
+                    <div className="text-[9px] text-muted-foreground">Reports</div>
                   </div>
                   <div className="p-1.5 rounded-lg bg-muted/50 text-center">
                     <div className="text-xs font-bold">{nearPolice.length}</div>

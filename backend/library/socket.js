@@ -5,11 +5,17 @@ import express from "express";
 const app = express();
 const server = http.createServer(app);
 
-const allowedOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "http://localhost:8083",
+    "http://localhost:8084",
+    process.env.FRONTEND_ORIGIN,
+].filter(Boolean);
 
 const io = new Server(server, {
     cors: {
-        origin: [allowedOrigin],
+        origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
     }});
@@ -18,7 +24,10 @@ const socketMap = {};
 
 io.on("connection",(socket)=>{
     console.log("Socket connected:", socket.id);
-        socketMap[socket.id] = socket.handshake.query.userId;
+    const userId = socket.handshake.query.userId;
+    socketMap[socket.id] = userId;
+    // Join a room named after the userId so we can emit directly via io.to(userId)
+    if (userId) socket.join(userId);
     io.emit("update", { message: "A new user has connected!", socketMap});
         socket.on("updateLocation", (data)=>{
             console.log("Received location update:", data);

@@ -1,6 +1,11 @@
 import { latLngToCell, gridDisk } from "h3-js";
 import HexZone from "../model/hex.model.js";
 
+// H3 resolution 7: ~1.2 km edge length, clearly visible hexagons on the map
+// gridDisk k=4 at res 7 covers ~5 km radius (61 hexes)
+const H3_RESOLUTION = 7;
+const GRID_RING_K = 4;
+
 export const getHex =  async (req, res) => {
   try {
     const latitude = Number(req.query.lat);
@@ -10,8 +15,8 @@ export const getHex =  async (req, res) => {
       return res.status(400).json({ message: "Valid lat and lng query params are required" });
     }
 
-    const centerHex = latLngToCell(latitude, longitude, 9);
-    const nearbyHexes = gridDisk(centerHex, 5);
+    const centerHex = latLngToCell(latitude, longitude, H3_RESOLUTION);
+    const nearbyHexes = gridDisk(centerHex, GRID_RING_K);
 
     const dbHexes = await HexZone.find({
       hexId: { $in: nearbyHexes }
@@ -28,12 +33,13 @@ export const getHex =  async (req, res) => {
 
     return res.json(result);
   } catch (error) {
+    console.error("Hex fetch error:", error);
     return res.status(500).json({ message: "Failed to fetch hex safety data" });
   }
 };
 
 export const updateHex = async (lat, lng, severity) => {
-  const hexId = latLngToCell(lat, lng, 9);
+  const hexId = latLngToCell(lat, lng, H3_RESOLUTION);
   const hex = await HexZone.findOne({ hexId });
   if (hex) {
     hex.dangerScore += Number(severity) || 0;

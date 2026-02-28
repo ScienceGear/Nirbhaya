@@ -13,8 +13,17 @@ const userSchema = new mongoose.Schema({
   username:  { type: String, required: true },
   email:     { type: String, required: true, unique: true },
   password:  { type: String, required: true },
-  role:      { type: String, enum: ["user", "guardian"], default: "user" },
+  role:      { type: String, enum: ["user", "guardian", "admin"], default: "user" },
   phone:     { type: String, default: "" },
+
+  // Onboarding profile
+  age:       { type: Number, default: null },
+  address:   { type: String, default: "" },
+  profilePic:{ type: String, default: "" },           // base64 or URL
+  guardianName:  { type: String, default: "" },       // optional guardian info during signup
+  guardianPhone: { type: String, default: "" },
+  isMinor:   { type: Boolean, default: false },       // true if age < 18
+  onboardingDone:{ type: Boolean, default: false },
 
   // Guardian linking
   guardianOf: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],   // guardian watches these users
@@ -42,6 +51,30 @@ const userSchema = new mongoose.Schema({
   },
   checkpointsPassed: { type: Number, default: 0 },
   checkpointsTotal:  { type: Number, default: 0 },
+  checkpoints: [{
+    name:   { type: String },
+    type:   { type: String },           // "police", "hospital", "safe_zone"
+    lat:    { type: Number },
+    lng:    { type: Number },
+    eta:    { type: String },
+    passed: { type: Boolean, default: false },
+  }],
+
+  // Trip history (completed navigations)
+  tripHistory: [{
+    origin:      { type: String },
+    destination: { type: String },
+    rsi:         { type: Number },
+    eta:         { type: String },
+    distance:    { type: String },
+    checkpoints: [{
+      name:   { type: String },
+      type:   { type: String },
+      passed: { type: Boolean, default: false },
+    }],
+    startedAt:   { type: Date },
+    endedAt:     { type: Date },
+  }],
 
   // Community points
   points: { type: Number, default: 0 },

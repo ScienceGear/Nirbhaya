@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { policeStations, type PoliceStation } from "@/lib/mockData";
 import { useI18n } from "@/lib/i18n";
 import DashboardNav from "@/components/DashboardNav";
+import GuestBanner from "@/components/GuestBanner";
 
 /* haversine — returns distance in km */
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -55,6 +56,7 @@ export default function PolicePage() {
     <div className="min-h-[100dvh] flex bg-background">
       <DashboardNav />
       <main className="flex-1 overflow-y-auto px-3 sm:px-5 lg:px-8 pt-4 pb-24 md:pb-10">
+      <GuestBanner />
       <div className="w-full space-y-4">
 
         {/* Header — compact */}

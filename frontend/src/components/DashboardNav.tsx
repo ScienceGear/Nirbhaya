@@ -1,7 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { type ElementType } from "react";
 import {
-  Home,
   Map,
   Siren,
   FileWarning,
@@ -11,17 +10,36 @@ import {
   Moon,
   LogOut,
   User,
+  ShieldCheck,
+  LogIn,
+  Users,
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { useAuth } from "@/lib/auth";
 
-const NAV_ITEMS = [
-  { to: "/", icon: Home, label: "Home" },
+const USER_NAV = [
   { to: "/dashboard", icon: Map, label: "Map" },
   { to: "/sos", icon: Siren, label: "SOS" },
   { to: "/report", icon: FileWarning, label: "Report" },
   { to: "/police", icon: Shield, label: "Police" },
   { to: "/settings", icon: Settings, label: "Settings" },
+];
+
+const ADMIN_NAV = [
+  { to: "/dashboard", icon: Map, label: "Map" },
+  { to: "/admin", icon: ShieldCheck, label: "Admin" },
+  { to: "/settings", icon: Settings, label: "Settings" },
+];
+
+const GUARDIAN_NAV = [
+  { to: "/guardian", icon: Users, label: "Guardian" },
+  { to: "/settings", icon: Settings, label: "Settings" },
+];
+
+const GUEST_NAV = [
+  { to: "/dashboard", icon: Map, label: "Map" },
+  { to: "/report", icon: FileWarning, label: "Report" },
+  { to: "/police", icon: Shield, label: "Police" },
 ];
 
 function NavButton({
@@ -63,7 +81,15 @@ function NavButton({
 export default function DashboardNav() {
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
-  const { user, logout } = useAuth();
+  const { user, logout, isGuest } = useAuth();
+
+  const NAV_ITEMS = isGuest
+    ? GUEST_NAV
+    : user?.role === "admin"
+      ? ADMIN_NAV
+      : user?.role === "guardian"
+        ? GUARDIAN_NAV
+        : USER_NAV;
 
   return (
     <>
@@ -103,13 +129,13 @@ export default function DashboardNav() {
           {user ? (
             <NavButton icon={LogOut} label="Logout" onClick={logout} />
           ) : (
-            <NavButton to="/login" icon={User} label="Login" active={pathname === "/login"} />
+            <NavButton to="/login" icon={LogIn} label="Login" active={pathname === "/login"} />
           )}
         </div>
       </aside>
 
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-[800] border-t border-border bg-card/95 backdrop-blur pb-[max(env(safe-area-inset-bottom),0px)]">
-        <div className="grid grid-cols-6 gap-0.5 px-1 py-1">
+        <div className={`grid gap-0.5 px-1 py-1 ${NAV_ITEMS.length > 6 ? "grid-cols-7" : "grid-cols-6"}`}>
           {NAV_ITEMS.map(({ to, icon, label }) => (
             <NavButton key={to} to={to} icon={icon} label={label} active={pathname === to} />
           ))}

@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, ReactNode, useEffect, useCallback } from "react";
 
-export type UserRole = "user" | "guardian";
+export type UserRole = "user" | "guardian" | "admin";
 
 export interface SharingPrefs {
   location: boolean;
@@ -18,6 +18,13 @@ export interface User {
   name: string;          // alias for username
   role: UserRole;
   phone?: string;
+  age?: number;
+  address?: string;
+  profilePic?: string;
+  guardianName?: string;
+  guardianPhone?: string;
+  isMinor?: boolean;
+  onboardingDone?: boolean;
   linkCode?: string;
   points?: number;
   sharingPrefs?: SharingPrefs;
@@ -26,24 +33,43 @@ export interface User {
   emergencyContacts?: Array<{ name: string; phone: string; relation: string }>;
 }
 
-const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
+export interface SignupData {
+  username: string;
+  email: string;
+  password: string;
+  role: UserRole;
+  phone?: string;
+  age?: number;
+  address?: string;
+  guardianName?: string;
+  guardianPhone?: string;
+  profilePic?: string;
+}
+
+const API = import.meta.env.VITE_API_BASE_URL || "";
 
 interface AuthCtx {
   user: User | null;
   loading: boolean;
+  isGuest: boolean;
   login: (email: string, password: string, role?: UserRole) => Promise<string | null>;
-  signup: (name: string, email: string, password: string, role?: UserRole) => Promise<string | null>;
+  signup: (data: SignupData) => Promise<string | null>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  enterGuestMode: () => void;
+  exitGuestMode: () => void;
 }
 
 const AuthContext = createContext<AuthCtx>({
   user: null,
   loading: true,
+  isGuest: false,
   login: async () => null,
   signup: async () => null,
   logout: async () => {},
   refreshUser: async () => {},
+  enterGuestMode: () => {},
+  exitGuestMode: () => {},
 });
 
 export const useAuth = () => useContext(AuthContext);
@@ -51,6 +77,7 @@ export const useAuth = () => useContext(AuthContext);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isGuest, setIsGuest] = useState(false);
 
   const toUser = (u: any): User => ({
     _id: u._id,
@@ -59,6 +86,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     name: u.username,
     role: u.role,
     phone: u.phone,
+    age: u.age,
+    address: u.address,
+    profilePic: u.profilePic,
+    guardianName: u.guardianName,
+    guardianPhone: u.guardianPhone,
+    isMinor: u.isMinor,
+    onboardingDone: u.onboardingDone,
     linkCode: u.linkCode,
     points: u.points,
     sharingPrefs: u.sharingPrefs,
@@ -97,23 +131,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await res.json();
       if (!res.ok) return data.message || "Login failed";
       setUser(toUser(data.user));
+      setIsGuest(false);
       return null; // success
     } catch (err: any) {
       return err.message || "Network error";
     }
   };
 
-  const signup = async (name: string, email: string, password: string, role: UserRole = "user"): Promise<string | null> => {
+  const signup = async (data: SignupData): Promise<string | null> => {
     try {
       const res = await fetch(`${API}/api/auth/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ username: name, email, password, role }),
+        body: JSON.stringify(data),
       });
-      const data = await res.json();
-      if (!res.ok) return data.message || "Signup failed";
-      setUser(toUser(data.user));
+      const json = await res.json();
+      if (!res.ok) return json.message || "Signup failed";
+      setUser(toUser(json.user));
+      setIsGuest(false);
       return null; // success
     } catch (err: any) {
       return err.message || "Network error";
@@ -125,10 +161,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
     } catch { /* ignore */ }
     setUser(null);
+    setIsGuest(false);
   };
 
+  const enterGuestMode = useCallback(() => {
+    setIsGuest(true);
+  }, []);
+
+  const exitGuestMode = useCallback(() => {
+    setIsGuest(false);
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, signup, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, isGuest, login, signup, logout, refreshUser, enterGuestMode, exitGuestMode }}>
       {children}
     </AuthContext.Provider>
   );
