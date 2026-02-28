@@ -1,15 +1,37 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Phone, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { logSOS, reverseGeocode } from "@/lib/api";
 
 export default function SOSButton() {
   const [expanded, setExpanded] = useState(false);
   const [alertSent, setAlertSent] = useState(false);
+  const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
 
-  const triggerSOS = () => {
+  // Get GPS on mount
+  useEffect(() => {
+    navigator.geolocation?.getCurrentPosition(
+      (p) => setGps({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      () => {}
+    );
+  }, []);
+
+  const triggerSOS = async (type = "SOS") => {
     if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
     setAlertSent(true);
+
+    // Log SOS to backend — notifies guardians + admins via socket
+    try {
+      let locName: string | undefined;
+      if (gps) {
+        try { locName = await reverseGeocode(gps.lat, gps.lng); } catch { locName = `${gps.lat},${gps.lng}`; }
+      }
+      await logSOS({ type, lat: gps?.lat, lng: gps?.lng, location: locName });
+    } catch (err) {
+      console.warn("[SOSButton] logSOS failed (user may not be logged in):", err);
+    }
+
     setTimeout(() => setAlertSent(false), 3000);
   };
 
@@ -31,13 +53,13 @@ export default function SOSButton() {
             ) : (
               <>
                 <p className="text-xs font-semibold text-muted-foreground uppercase">Emergency</p>
-                <Button size="sm" className="w-full rounded-xl justify-start" onClick={triggerSOS}>
+                <Button size="sm" className="w-full rounded-xl justify-start" onClick={() => triggerSOS("Police SOS")}>
                   <Phone className="h-3.5 w-3.5 mr-2" /> Police (100)
                 </Button>
-                <Button size="sm" variant="outline" className="w-full rounded-xl justify-start" onClick={triggerSOS}>
+                <Button size="sm" variant="outline" className="w-full rounded-xl justify-start" onClick={() => triggerSOS("Ambulance SOS")}>
                   <Phone className="h-3.5 w-3.5 mr-2" /> Ambulance (108)
                 </Button>
-                <Button size="sm" variant="outline" className="w-full rounded-xl justify-start" onClick={triggerSOS}>
+                <Button size="sm" variant="outline" className="w-full rounded-xl justify-start" onClick={() => triggerSOS("Nirbhaya SOS")}>
                   <Phone className="h-3.5 w-3.5 mr-2" /> Nirbhaya (1091)
                 </Button>
               </>

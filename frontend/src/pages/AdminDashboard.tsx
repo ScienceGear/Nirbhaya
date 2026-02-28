@@ -17,6 +17,7 @@ import DashboardNav from "@/components/DashboardNav";
 import { useQuery } from "@tanstack/react-query";
 import { adminGetAllReports, adminGetAllUsers, adminGetAlerts } from "@/lib/api";
 import { io as ioClient, type Socket } from "socket.io-client";
+import { useSosAlarm } from "@/hooks/use-sos-alarm";
 
 const GEMINI_KEY = "AIzaSyBobtdTj_dANiuRX1UNjKFFsA295cQNwes";
 
@@ -47,6 +48,7 @@ export default function AdminDashboard() {
   // Live SOS alerts via socket
   const [liveSosAlerts, setLiveSosAlerts] = useState<any[]>([]);
   const socketRef = useRef<Socket | null>(null);
+  const { playAlarm } = useSosAlarm();
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
 
@@ -66,6 +68,8 @@ export default function AdminDashboard() {
     socketRef.current = socket;
     socket.on("sosAlert", (data: any) => {
       setLiveSosAlerts((prev) => [{ ...data, timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 50));
+      // Play alarm sound notification
+      playAlarm();
     });
     return () => { socket.disconnect(); };
   }, [user?._id]);

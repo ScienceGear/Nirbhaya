@@ -25,7 +25,7 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, Polygon, useM
 import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, getSafeCityIncidentDetails, getSafeCityNearby, getHospitalsNear, type MapReport, type HexZoneData, type SafeCityIncident, type SafeCityIncidentDetails, type HospitalData } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, getSafeCityIncidentDetails, getSafeCityNearby, getHospitalsNear, logSOS, type MapReport, type HexZoneData, type SafeCityIncident, type SafeCityIncidentDetails, type HospitalData } from "@/lib/api";
 import { cellToBoundary } from "h3-js";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 
@@ -1001,7 +1001,26 @@ function StarRating({ value, onChange }: { value: number; onChange: (n: number) 
 }
 
 /* ─── Emergency Modal ────────────────────────────────────────────────────── */
-function EmergencyModal({ onClose }: { onClose: () => void }) {
+function EmergencyModal({ onClose, userLat, userLng }: { onClose: () => void; userLat?: number; userLng?: number }) {
+  const [logged, setLogged] = useState(false);
+
+  // Log SOS to backend on mount — notifies guardians + admins via socket
+  useEffect(() => {
+    if (logged) return;
+    setLogged(true);
+    (async () => {
+      try {
+        let locName: string | undefined;
+        if (userLat != null && userLng != null) {
+          try { locName = await reverseGeocode(userLat, userLng); } catch { locName = `${userLat},${userLng}`; }
+        }
+        await logSOS({ type: "Emergency SOS", lat: userLat, lng: userLng, location: locName });
+      } catch (err) {
+        console.warn("[EmergencyModal] logSOS failed (user may not be logged in):", err);
+      }
+    })();
+  }, []);
+
   return (
     <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/80 backdrop-blur-sm">
       <motion.div initial={{ scale: 0.85, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
@@ -2412,7 +2431,7 @@ export default function Dashboard() {
     if (payload) updateLocation(payload).catch(() => {});
     // Track nav start time
     if (navMode) navStartTimeRef.current = new Date();
-  }, [navMode, cpPassedCount]);
+  }, [navMode, cpPassedCount, buildLocationPayload]);
 
   // Periodic sync every 10 seconds
   useEffect(() => {
@@ -3438,7 +3457,7 @@ export default function Dashboard() {
 
         {/* Modals */}
         <AnimatePresence>
-          {showEmergencyModal && <EmergencyModal onClose={() => setShowEmergencyModal(false)} />}
+          {showEmergencyModal && <EmergencyModal onClose={() => setShowEmergencyModal(false)} userLat={userLoc?.lat} userLng={userLoc?.lng} />}
           {showReportModal    && <ReportModal    onClose={() => setShowReportModal(false)} />}
           {showReviewModal && selectedRoute && (
             <ReviewModal routeName={selectedRoute.name} onClose={() => setShowReviewModal(false)} />

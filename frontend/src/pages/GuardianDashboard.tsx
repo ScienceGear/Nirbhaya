@@ -18,6 +18,7 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, CircleMarker } from "
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { io as ioClient, type Socket } from "socket.io-client";
+import { useSosAlarm } from "@/hooks/use-sos-alarm";
 
 const GEMINI_KEY = "AIzaSyBobtdTj_dANiuRX1UNjKFFsA295cQNwes";
 
@@ -88,9 +89,14 @@ export default function GuardianDashboard() {
     setLastRefresh(new Date());
   };
 
+  // Use a ref so socket handlers always call the latest fetchWatched
+  const fetchWatchedRef = useRef(fetchWatched);
+  fetchWatchedRef.current = fetchWatched;
+
   // Real-time socket connection for instant SOS alerts & location updates
   const socketRef = useRef<Socket | null>(null);
   const [liveSosAlerts, setLiveSosAlerts] = useState<Array<{ userId: string; username: string; type: string; lat?: number; lng?: number; location?: string; phone?: string; timestamp: string }>>([]);
+  const { playAlarm } = useSosAlarm();
 
   useEffect(() => {
     if (!user?._id) return;
@@ -106,14 +112,16 @@ export default function GuardianDashboard() {
     socket.on("sosAlert", (data: any) => {
       console.log("[Guardian] SOS ALERT received:", data);
       setLiveSosAlerts((prev) => [{ ...data, timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 50));
-      // Also refresh watched users
-      fetchWatched();
+      // Play alarm sound notification
+      playAlarm();
+      // Also refresh watched users to get DB-persisted SOS data
+      fetchWatchedRef.current();
     });
 
     socket.on("watchedUserUpdate", (data: any) => {
-      console.log("[Guardian] User update:", data.username);
-      // Trigger a refresh to pick up latest data
-      fetchWatched();
+      console.log("[Guardian] User update:", data.username, data);
+      // Trigger a refresh to pick up latest data (navigation, checkpoints, etc.)
+      fetchWatchedRef.current();
     });
 
     return () => { socket.disconnect(); };
@@ -298,7 +306,7 @@ GUARDIAN DASHBOARD DATA:
             <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0" />
             <div className="flex-1">
               <p className="text-xs font-semibold text-amber-600">{fetchError}</p>
-              <p className="text-[10px] text-muted-foreground">Check that the backend server is running on port 3000.</p>
+              <p className="text-[10px] text-muted-foreground">Check your internet connection or try refreshing.</p>
             </div>
             <Button variant="outline" size="sm" className="h-7 rounded-full text-[10px] shrink-0" onClick={fetchWatched}>
               <RefreshCw className="h-3 w-3 mr-1" /> Retry

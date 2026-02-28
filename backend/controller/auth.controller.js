@@ -254,17 +254,17 @@ export const updateLocation = async (req, res) => {
       if (currentRoute) update.currentRoute = currentRoute;
       if (checkpointsPassed != null) update.checkpointsPassed = checkpointsPassed;
       if (checkpointsTotal != null) update.checkpointsTotal = checkpointsTotal;
-      if (Array.isArray(checkpoints)) update.checkpoints = checkpoints;
+      if (Array.isArray(checkpoints) && checkpoints.length > 0) update.checkpoints = checkpoints;
     }
 
     await User.findByIdAndUpdate(req.user._id, { $set: update });
 
     // Real-time: notify all guardians of this user
     try {
-      const user = await User.findById(req.user._id).select("myGuardians username");
+      const user = await User.findById(req.user._id).select("myGuardians username phone");
       if (user && user.myGuardians?.length) {
         const { io } = await import("../library/socket.js");
-        const payload = { userId: user._id, username: user.username, ...update };
+        const payload = { userId: user._id, username: user.username, phone: user.phone, ...update };
         for (const gId of user.myGuardians) {
           io.to(String(gId)).emit("watchedUserUpdate", payload);
         }

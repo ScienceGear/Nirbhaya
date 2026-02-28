@@ -21,6 +21,7 @@ const allowedOrigins = [
     "http://localhost:8080",
     "http://localhost:8084",
     "http://localhost:8083",
+    "http://10.23.12.219:8080",
     // Production origins from environment
     ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()) : []),
 ];
@@ -43,6 +44,9 @@ app.use(cors({
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
+
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/", (req, res) => res.json({ status: "ok", app: "nirbhaya-backend" }));
 
 app.use("/api/tracker",trackerRouter);
 app.use("/api/auth",authRouter);
