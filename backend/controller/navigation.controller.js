@@ -1,6 +1,7 @@
 import PoliceStation from "../model/policestations.model.js";
 import Report from "../model/report.model.js";
 import { getSafeCityMapData, getSafeCityNear } from "../library/safecity.library.js";
+import { findHybridRoutes, invalidateSafetyCache } from "../library/hybrid-router.js";
 
 const contactsStore = new Map();
 const userPointsStore = new Map();
@@ -317,6 +318,7 @@ export const createReportCompat = async (req, res) => {
       reporterKey,
     });
     await report.save();
+    invalidateSafetyCache(); // new data → force safety cache refresh
     const totalPoints = (userPointsStore.get(reporterKey) || 0) + pointsAwarded;
     userPointsStore.set(reporterKey, totalPoints);
 
@@ -451,4 +453,50 @@ export const saveContactsCompat = (req, res) => {
 export const triggerSosCompat = (req, res) => {
   const type = String(req.body?.type || "SOS");
   return res.json({ success: true, message: `${type} alert sent` });
+};
+
+/**
+ * GET /api/navigation/route
+ * Query params: startLat, startLng, endLat, endLng, [profile], [hexPath]
+ */
+export const getRoute = async (req, res) => {
+  const startLat = toNumber(req.query.startLat);
+  const startLng = toNumber(req.query.startLng);
+  const endLat   = toNumber(req.query.endLat);
+  const endLng   = toNumber(req.query.endLng);
+
+  if (!startLat || !startLng || !endLat || !endLng) {
+    return res.status(400).json({
+      success: false,
+      message: "Required query params: startLat, startLng, endLat, endLng",
+    });
+  }
+
+  const profile      = ["foot", "driving", "cycling"].includes(req.query.profile)
+    ? req.query.profile
+    : "foot";
+  const includeHexPath = req.query.hexPath === "true";
+
+  try {
+    const result = await findHybridRoutes({
+      startLat, startLng, endLat, endLng,
+      profile,
+      resolution: 9,
+      includeHexPath,
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error("[getRoute] Error:", error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/** POST /api/navigation/safety-cache/invalidate */
+export const invalidateCache = (_req, res) => {
+  invalidateSafetyCache();
+  return res.json({ success: true, message: "Safety cache cleared" });
 };

@@ -21,13 +21,20 @@ const allowedOrigins = [
     "http://localhost:8080",
     "http://localhost:8084",
     "http://localhost:8083",
+    // Production origins from environment
+    ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()) : []),
 ];
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-            return;
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) { callback(null, true); return; }
+        // Allow any *.railway.app domain
+        if (origin.endsWith(".railway.app") || origin.endsWith(".up.railway.app")) {
+            callback(null, true); return;
+        }
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true); return;
         }
         callback(new Error("Not allowed by CORS"));
     },

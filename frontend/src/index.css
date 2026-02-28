@@ -181,6 +181,86 @@
 .leaflet-popup-close-button { display: none !important; }
 
 /* ═══════════════════════════════════════════════════
+   Community Incident Report — Map Popup (inc-popup)
+   ═══════════════════════════════════════════════════ */
+.inc-popup-root {
+  min-width: 250px;
+  max-width: 290px;
+  margin: -1px;
+  overflow: hidden;
+  font-family: 'DM Sans','Inter',system-ui,sans-serif;
+}
+.inc-popup-accent {
+  height: 3px;
+  width: 100%;
+}
+.inc-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  background: #fff;
+  border-bottom: 1px solid #f4f4f5;
+}
+.inc-popup-icon {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.inc-popup-header-text { flex: 1; min-width: 0; }
+.inc-popup-title {
+  display: block;
+  font-size: 13px; font-weight: 700; color: #111827;
+  line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inc-popup-sub {
+  display: block;
+  font-size: 10.5px; color: #9ca3af; margin-top: 1px;
+}
+.inc-popup-sev {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 700; letter-spacing: .3px;
+  padding: 3px 8px; border-radius: 20px;
+  text-transform: uppercase;
+}
+.inc-popup-body {
+  padding: 10px 14px 12px;
+  background: #fafafa;
+}
+.inc-popup-desc {
+  font-size: 12px; color: #4b5563; line-height: 1.6;
+  margin: 0 0 9px;
+  font-style: italic;
+  display: -webkit-box; -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.inc-popup-rows {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.inc-popup-row {
+  display: flex; align-items: center; gap: 7px;
+}
+.inc-popup-row svg { flex-shrink: 0; }
+.inc-popup-row span {
+  font-size: 11.5px; color: #374151;
+}
+.inc-popup-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px 10px;
+  background: #fff;
+  border-top: 1px solid #f4f4f5;
+}
+.inc-popup-badge {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase; color: #9ca3af;
+}
+.inc-popup-anon {
+  font-size: 10px; color: #d1d5db;
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════
    SafeCity — Map Popup
    ═══════════════════════════════════════════════════ */
 .sc-popup-root {

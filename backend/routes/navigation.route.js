@@ -8,6 +8,8 @@ import {
   getReportsCompat,
   saveContactsCompat,
   triggerSosCompat,
+  getRoute,
+  invalidateCache,
 } from "../controller/navigation.controller.js";
 
 const navigationRouter = Router();
@@ -20,5 +22,9 @@ navigationRouter.put("/contacts", saveContactsCompat);
 navigationRouter.post("/sos", triggerSosCompat);
 navigationRouter.get("/points", getUserPointsCompat);
 navigationRouter.get("/crowd/heatmap", getCrowdHeatmapCompat);
+
+// ── Hybrid safety routing ───────────────────────────────────────────────────
+navigationRouter.get("/route", getRoute);
+navigationRouter.post("/safety-cache/invalidate", invalidateCache);
 
 export default navigationRouter;

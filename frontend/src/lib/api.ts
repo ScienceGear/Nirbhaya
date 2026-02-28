@@ -365,6 +365,8 @@ export interface MapReport {
   description: string;
   timestamp: string;
   areaRating: number;
+  locationText?: string;
+  anonymous?: boolean;
 }
 
 export async function getAllReportsForMap() {

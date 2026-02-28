@@ -1,4 +1,5 @@
 ﻿import { useState, useEffect, useRef, useCallback, useMemo, type ElementType } from "react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { Link, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -513,162 +514,224 @@ function generateCheckpoints(
 }
 
 /* ── OSRM real-road routing — ALWAYS returns real road geometries, never bezier curves ── */
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * INCIDENT PROXIMITY SCORER
+ * Returns penalty score for a route based on incident density nearby.
+ * Also returns counts of severe/repeated incidents for UI display.
+ * ───────────────────────────────────────────────────────────────────────────*/
+function scoreRouteAgainstIncidents(
+  coords: [number, number][],
+  incidents: RouteIncidentInput[],
+  scanRadius = 0.40,
+): { penalty: number; count: number; repeatedNearby: number; severeNearby: number; incidentNames: string[] } {
+  if (!incidents.length || !coords.length)
+    return { penalty: 0, count: 0, repeatedNearby: 0, severeNearby: 0, incidentNames: [] };
+
+  const step = Math.max(1, Math.floor(coords.length / 150));
+  let penalty = 0;
+  let count = 0;
+  let repeatedNearby = 0;
+  let severeNearby = 0;
+  const incidentNames: string[] = [];
+
+  for (const inc of incidents) {
+    let minDist = Infinity;
+    for (let i = 0; i < coords.length; i += step) {
+      const d = haversineKm(coords[i][1], coords[i][0], inc.lat, inc.lng);
+      if (d < minDist) minDist = d;
+    }
+    if (minDist > scanRadius) continue;
+
+    count++;
+    const severity  = normalizeSeverity(inc.severity);
+    const frequency = Math.max(1, Math.round(inc.frequency ?? 1));
+    const hotspot   = clamp(inc.hotspotWeight ?? 0, 0, 1);
+
+    // Proximity multiplier: very close = full weight, farther = less weight
+    const prox = minDist <= 0.15 ? 2.0 : minDist <= 0.25 ? 1.2 : 0.6;
+    const repeatBoost   = frequency >= 3 ? (frequency - 1) * 2.0 : (frequency - 1) * 0.4;
+    const severePenalty = severity >= 3 ? 6.0 : severity * 1.0;
+    const hotPenalty    = hotspot * 3.5;
+
+    penalty += (severePenalty + repeatBoost + hotPenalty) * prox;
+
+    if (severity >= 3) { severeNearby++; if (incidentNames.length < 3) incidentNames.push("high-severity zone"); }
+    if (frequency >= 3) { repeatedNearby++; if (incidentNames.length < 3) incidentNames.push("repeat-incident area"); }
+  }
+
+  return {
+    penalty: Math.min(35, Math.round(penalty)), // cap at 35 → RSI minimum ~50
+    count,
+    repeatedNearby,
+    severeNearby,
+    incidentNames: [...new Set(incidentNames)],
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * PERP-OFFSET WAYPOINT
+ * Creates a waypoint perpendicular to the start→end axis at a given fractional
+ * position along the route. offsetFactor ~0.06 → ~600m for a 10km route.
+ * This forces OSRM onto a genuinely different parallel road.
+ * ───────────────────────────────────────────────────────────────────────────*/
+function perpOffsetWaypoint(
+  s: { lat: number; lng: number },
+  e: { lat: number; lng: number },
+  t: number,   // fractional position along route [0..1]
+  factor: number, // perpendicular offset factor (positive = left, negative = right)
+): { lat: number; lng: number } {
+  const baseLat = s.lat + (e.lat - s.lat) * t;
+  const baseLng = s.lng + (e.lng - s.lng) * t;
+  const dLat = e.lat - s.lat;
+  const dLng = e.lng - s.lng;
+  // Perpendicular: rotate 90°
+  return {
+    lat: baseLat + dLng * factor,
+    lng: baseLng - dLat * factor,
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * MAIN: fetchRealRoutes
+ *
+ * Strategy:
+ *   1. Get 3 *geometrically distinct* road routes from OSRM using different
+ *      mid-waypoints (perpendicular offsets of ≈600m force different parallel roads)
+ *   2. Score every candidate route against incidents within 400m
+ *   3. Sort by penalty — lowest = Safest, middle = Balanced, highest = Fastest
+ *   4. RSI is individually calculated from real incident proximity
+ * ───────────────────────────────────────────────────────────────────────────*/
 async function fetchRealRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
   incidentData: RouteIncidentInput[] = [],
   mode: TravelMode = "foot",
 ): Promise<RouteOption[]> {
-  const computeRoutePenalty = (coords: [number, number][]) => {
-    if (!incidentData.length || !coords.length) {
-      return { penalty: 0, repeatedNearby: 0, severeNearby: 0, blocked: false };
+  const COLORS = { safest: "#22c55e", moderate: "#f59e0b", fastest: "#ef4444" } as const;
+  const profile = "car";
+
+  // Straight-line km used for offset scaling
+  const straightKm = haversineKm(s.lat, s.lng, e.lat, e.lng);
+  // 500-700m perpendicular offset forces OSRM onto a different parallel road
+  const FACTOR = clamp(0.006 / Math.max(straightKm, 1), 0.0015, 0.012);
+
+  /* ── Fetch 3 candidates in parallel ── */
+  // Candidate A: direct fastest (no via-points)
+  // Candidate B: via 2 points offset LEFT  (~600m at route midpoints)
+  // Candidate C: via 2 points offset RIGHT (~600m at route midpoints)
+  const via_L1 = perpOffsetWaypoint(s, e, 0.35, +FACTOR);
+  const via_L2 = perpOffsetWaypoint(s, e, 0.65, +FACTOR);
+  const via_R1 = perpOffsetWaypoint(s, e, 0.35, -FACTOR);
+  const via_R2 = perpOffsetWaypoint(s, e, 0.65, -FACTOR);
+
+  const [directResults, leftResults, rightResults] = await Promise.all([
+    osrmFetch([s, e], true, profile),
+    osrmFetch([s, via_L1, via_L2, e], false, profile),
+    osrmFetch([s, via_R1, via_R2, e], false, profile),
+  ]);
+
+  /* ── Fallback: OSRM unavailable ── */
+  if (directResults.length === 0) {
+    const fc: [number, number][] = [[s.lng, s.lat], [e.lng, e.lat]];
+    const km = haversineKm(s.lat, s.lng, e.lat, e.lng);
+    const mn = (k: number) => Math.max(1, Math.round((k / MODE_SPEED_KMH[mode]) * 60));
+    return [
+      { id: "r1", name: "Safest Route",   type: "safest",   rsi: 82, duration: `${mn(km)} min`, distance: `${km.toFixed(1)} km`, color: COLORS.safest,   reasons: ["Safety-first path"],   coordinates: fc },
+      { id: "r2", name: "Balanced Route", type: "moderate", rsi: 72, duration: `${mn(km)} min`, distance: `${km.toFixed(1)} km`, color: COLORS.moderate, reasons: ["Balanced option"],      coordinates: fc },
+      { id: "r3", name: "Fastest Direct", type: "fastest",  rsi: 62, duration: `${mn(km)} min`, distance: `${km.toFixed(1)} km`, color: COLORS.fastest,  reasons: ["Fastest direct path"], coordinates: fc },
+    ];
+  }
+
+  const fastestRaw = directResults[0];
+  const fastKm     = fastestRaw.distance / 1000;
+
+  // Collect valid candidates (must not be > 60% longer than direct)
+  type Candidate = { raw: any; score: ReturnType<typeof scoreRouteAgainstIncidents>; distKm: number };
+  const candidates: Candidate[] = [];
+
+  const addCandidate = (raw: any) => {
+    const distKm = raw.distance / 1000;
+    if (distKm > fastKm * 1.6) return; // discard extreme detours
+    const score = scoreRouteAgainstIncidents(raw.geometry.coordinates as [number, number][], incidentData);
+    candidates.push({ raw, score, distKm });
+  };
+
+  addCandidate(fastestRaw);
+  if (directResults.length > 1) addCandidate(directResults[1]); // OSRM alternative if available
+  if (leftResults.length  > 0) addCandidate(leftResults[0]);
+  if (rightResults.length > 0) addCandidate(rightResults[0]);
+
+  // Remove geometrically duplicate routes (same distance within 3%)
+  const unique: Candidate[] = [];
+  for (const c of candidates) {
+    if (!unique.some((u) => Math.abs(u.distKm - c.distKm) / Math.max(u.distKm, 0.1) < 0.03)) {
+      unique.push(c);
     }
-    const step = Math.max(1, Math.floor(coords.length / 80));
-    let penalty = 0;
-    let repeatedNearby = 0;
-    let severeNearby = 0;
+  }
 
-    incidentData.forEach((incident) => {
-      let minDist = Infinity;
-      for (let i = 0; i < coords.length; i += step) {
-        const [lng, lat] = coords[i];
-        const dist = haversineKm(lat, lng, incident.lat, incident.lng);
-        if (dist < minDist) minDist = dist;
-      }
-      if (minDist <= 1.2) {
-        const severity = normalizeSeverity(incident.severity);
-        const ratingRisk = typeof incident.areaRating === "number" ? Math.max(0, 3 - incident.areaRating) : 0;
-        const frequency = Math.max(1, Math.round(incident.frequency ?? 1));
-        const hotspotWeight = clamp(incident.hotspotWeight ?? 0, 0, 1);
+  // Sort by penalty (ascending) → index 0 = safest
+  unique.sort((a, b) => a.score.penalty - b.score.penalty);
 
-        const proximityMultiplier =
-          minDist <= 0.2 ? 1.4 :
-          minDist <= 0.5 ? 1 :
-          0.65;
+  // Ensure exactly 3 slots (pad with fastest if needed)
+  while (unique.length < 3) unique.push(unique[0]);
+  const [safeCand, midCand, fastCand] = unique.slice(0, 3);
 
-        const severityPenalty = severity * 3.2 * proximityMultiplier;
-        const repeatPenalty = (frequency - 1) * 1.8 * proximityMultiplier;
-        const hotspotPenalty = hotspotWeight * 8 * proximityMultiplier;
-        const localSafetyPenalty = ratingRisk * 1.8;
+  /* ── Build RouteOption from a candidate ── */
+  const buildRoute = (
+    cand: Candidate,
+    id: string,
+    name: string,
+    type: "safest" | "moderate" | "fastest",
+    baseRsi: number,
+    baseReasons: string[],
+  ): RouteOption => {
+    const coords      = cand.raw.geometry.coordinates as [number, number][];
+    const distKm      = cand.distKm;
+    const durationMin = Math.max(1, Math.round((distKm / MODE_SPEED_KMH[mode]) * 60));
+    const speedScale  = (durationMin * 60) / Math.max(1, cand.raw.duration);
+    const rsi         = Math.max(45, Math.min(97, baseRsi - cand.score.penalty));
 
-        penalty += severityPenalty + repeatPenalty + hotspotPenalty + localSafetyPenalty;
+    const reasons = [...baseReasons];
+    if (cand.score.count === 0)            reasons.push("No reported incidents along this corridor");
+    if (cand.score.severeNearby > 0)       reasons.push(`${cand.score.severeNearby} high-severity incident${cand.score.severeNearby > 1 ? "s" : ""} nearby`);
+    if (cand.score.repeatedNearby > 0)     reasons.push(`${cand.score.repeatedNearby} repeat-incident zone${cand.score.repeatedNearby > 1 ? "s" : ""} nearby`);
 
-        if (severity >= 3 && minDist <= 0.55) severeNearby += 1;
-        if (frequency >= 3 && minDist <= 0.65) repeatedNearby += 1;
-      }
-    });
-
-    const blocked = repeatedNearby >= 3 || severeNearby >= 4;
     return {
-      penalty: Math.min(65, Math.round(penalty)),
-      repeatedNearby,
-      severeNearby,
-      blocked,
+      id,
+      name,
+      type,
+      rsi,
+      duration:    `${durationMin} min`,
+      distance:    `${distKm.toFixed(1)} km`,
+      color:       COLORS[type],
+      reasons,
+      coordinates: coords,
+      steps:       extractSteps(cand.raw, speedScale),
+      checkpoints: generateCheckpoints(coords, policeStations, MODE_SPEED_KMH[mode]),
     };
   };
 
-  const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
-  const NAMES = ["Safest via Main Roads", "Balanced Route", "Fastest Direct"];
-  const TYPES = ["safest", "moderate", "fastest"] as const;
-  const BASE_RSI = [88, 72, 54];
-  const REASONS = [
-    ["Better-lit segments", "Lower incident density", "More support points nearby"],
-    ["Balanced time and safety", "Mixed main + inner roads", "Moderate CCTV coverage"],
-    ["Lowest ETA", "Direct road geometry", "Avoid if you prefer higher safety score"],
-  ];
+  // Determine if safest route genuinely diverted (different geometry from fastest)
+  const safeDistKm  = safeCand.distKm;
+  const fastDistKm  = fastCand.distKm;
+  const hasDiversion = Math.abs(safeDistKm - fastDistKm) / Math.max(fastDistKm, 0.1) > 0.04;
+  const avoidedCount = fastCand.score.count - safeCand.score.count;
 
-  const toRoute = (raw: any, i: number): (RouteOption & { __blocked?: boolean }) => {
-    const coords = raw.geometry.coordinates as [number, number][];
-    const routeRisk = computeRoutePenalty(coords);
-    const adjustedRsi = Math.max(8, BASE_RSI[Math.min(i, 2)] - routeRisk.penalty);
-    const reasons = [...REASONS[Math.min(i, 2)]];
-    if (routeRisk.penalty >= 5) reasons.push("Real incident reports near this route lowered RSI");
-    if (routeRisk.repeatedNearby >= 2) reasons.push("Repeated incidents detected along this corridor");
-    if (routeRisk.severeNearby >= 2) reasons.push("Multiple high-severity incidents close to this route");
-    if (routeRisk.blocked) reasons.push("Avoided due to frequent repeated high-risk incidents");
-    // Recalculate duration from actual distance using the selected travel mode speed
-    // (OSRM public server only has the driving profile, so raw.duration is always car-speed)
-    const distKm = raw.distance / 1000;
-    const modeDurationMin = Math.max(1, Math.round((distKm / MODE_SPEED_KMH[mode]) * 60));
-    // Scale step durations: ratio of mode time to OSRM car time
-    const osrmDurationSec = raw.duration || 1;
-    const speedScale = (modeDurationMin * 60) / osrmDurationSec;
-    return {
-      id: `r${i + 1}`,
-      name: NAMES[Math.min(i, 2)],
-      type: TYPES[Math.min(i, 2)],
-      rsi: adjustedRsi,
-      duration: `${modeDurationMin} min`,
-      distance: `${distKm.toFixed(1)} km`,
-      color: COLOR[Math.min(i, 2)],
-      reasons,
-      coordinates: coords,
-      steps: extractSteps(raw, speedScale),
-      checkpoints: generateCheckpoints(coords, policeStations, MODE_SPEED_KMH[mode]),
-      __blocked: routeRisk.blocked,
-    } as RouteOption & { steps?: any[] };
-  };
+  const safeName    = hasDiversion && avoidedCount > 0
+    ? `Safest — ${avoidedCount} Incident${avoidedCount > 1 ? "s" : ""} Avoided`
+    : "Safest Route";
+  const safeReasons = hasDiversion && avoidedCount > 0
+    ? [`Avoids ${avoidedCount} reported incident zone${avoidedCount > 1 ? "s" : ""}`, "Alternate road corridor", "Lowest incident density"]
+    : safeCand.score.count === 0
+      ? ["No reported incidents on this path", "Clearest corridor available", "Recommended for night travel"]
+      : ["Lowest incident density among all routes", "Fewest danger zones along path", "Best safety score"];
 
-  const profile = "car"; // Public OSRM only supports driving; we recalculate duration per mode
+  const safestRoute  = buildRoute(safeCand,  "r1", safeName,       "safest",   90, safeReasons);
+  const balancedRoute = buildRoute(midCand,  "r2", "Balanced Route","moderate", 82, ["Moderate incident density", "Good balance of speed and safety", "Standard road corridor"]);
+  const fastestRoute  = buildRoute(fastCand, "r3", "Fastest Direct","fastest",  76, ["Shortest travel time", "Direct road geometry", "Fastest arrival"]);
 
-  // Step 1: Try direct OSRM call with alternatives
-  const directRoutes = await osrmFetch([s, e], true, profile);
-  const collected: any[] = [...directRoutes];
-
-  // Step 2: If we don't have 3 routes yet, generate waypoint-offset routes on real roads
-  if (collected.length < 3) {
-    const offsets = [0.35, -0.35, 0.6, -0.6];
-    for (const factor of offsets) {
-      if (collected.length >= 3) break;
-      const via = offsetWaypoint(s, e, factor);
-      const viaRoutes = await osrmFetch([s, via, e], false, profile);
-      if (viaRoutes.length > 0) {
-        // Check it's actually different from existing routes (> 200m divergence)
-        const isDifferent = collected.every((existing) => {
-          const eMid = existing.geometry.coordinates[Math.floor(existing.geometry.coordinates.length / 2)];
-          const nMid = viaRoutes[0].geometry.coordinates[Math.floor(viaRoutes[0].geometry.coordinates.length / 2)];
-          return haversineKm(eMid[1], eMid[0], nMid[1], nMid[0]) > 0.2;
-        });
-        if (isDifferent) collected.push(viaRoutes[0]);
-      }
-    }
-  }
-
-  // Step 3: If we still don't have 3 (edge case: very short route), duplicate with slight variation
-  while (collected.length < 3 && collected.length > 0) {
-    collected.push(collected[collected.length - 1]);
-  }
-
-  if (collected.length === 0) {
-    // Absolute last resort: return a straight-line route so the app doesn't break
-    const fallbackCoords: [number, number][] = [[s.lng, s.lat], [e.lng, e.lat]];
-    return TYPES.map((type, i) => ({
-      id: `r${i + 1}`,
-      name: NAMES[i],
-      type,
-      rsi: BASE_RSI[i],
-      duration: `${Math.max(1, Math.round(haversineKm(s.lat, s.lng, e.lat, e.lng) / MODE_SPEED_KMH[mode] * 60))} min`,
-      distance: `${haversineKm(s.lat, s.lng, e.lat, e.lng).toFixed(1)} km`,
-      color: COLOR[i],
-      reasons: REASONS[i],
-      coordinates: fallbackCoords,
-    }));
-  }
-
-  // Sort: longest first (safest tends to go around), shortest last (fastest)
-  collected.sort((a, b) => b.distance - a.distance);
-  const scored = collected
-    .slice(0, 3)
-    .map((raw, i) => toRoute(raw, i))
-    .sort((a, b) => b.rsi - a.rsi);
-
-  const acceptable = scored.filter((r) => !r.__blocked && r.rsi >= 25);
-  if (acceptable.length >= 2) {
-    return acceptable.slice(0, 3).map(({ __blocked, ...route }) => route);
-  }
-
-  const fallback = scored.slice(0, 3).map(({ __blocked, ...route }) => route);
-  return fallback;
+  return [safestRoute, balancedRoute, fastestRoute];
 }
 
 /* ── Gemini 2.5 Flash route safety analysis ── */
@@ -1223,16 +1286,72 @@ function IncidentMarkerLayer({ reports }: { reports: MapReport[] }) {
   if (!reports.length) return null;
   return (
     <>
-      {reports.map((r) => (
-        <Marker key={`report-${r._id}`} position={[r.latitude, r.longitude]} icon={icon}>
-          <Popup>
-            <strong className="block text-sm capitalize">{r.incidentType?.replace(/_/g, " ") || "Report"}</strong>
-            <span className="text-xs">{r.description || "No description"}</span><br />
-            <span className={`text-xs font-semibold ${r.severity === "High" ? "text-red-500" : r.severity === "Medium" ? "text-amber-500" : "text-emerald-500"}`}>{r.severity}</span>
-            <span className="text-xs text-gray-400 ml-2">{r.timestamp ? new Date(r.timestamp).toLocaleDateString() : ""}</span>
-          </Popup>
-        </Marker>
-      ))}
+      {reports.map((r) => {
+        const sevColor = r.severity === "High" ? "#dc2626" : r.severity === "Medium" ? "#d97706" : "#16a34a";
+        const sevBg    = r.severity === "High" ? "#fef2f2" : r.severity === "Medium" ? "#fffbeb" : "#f0fdf4";
+        const sevLabel = r.severity || "Low";
+        const title    = r.incidentType?.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Incident Report";
+        const dateStr  = r.timestamp ? new Date(r.timestamp).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
+        const IncIcon = () => {
+          const s = { width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+          if (r.incidentType === "theft")      return <svg {...s}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
+          if (r.incidentType === "harassment") return <svg {...s}><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 10-16 0"/></svg>;
+          if (r.incidentType === "stalking")   return <svg {...s}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>;
+          return <svg {...s}><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
+        };
+        return (
+          <Marker key={`report-${r._id}`} position={[r.latitude, r.longitude]} icon={icon}>
+            <Popup>
+              <div className="inc-popup-root">
+                {/* colour accent bar */}
+                <div className="inc-popup-accent" style={{ background: sevColor }} />
+                {/* header */}
+                <div className="inc-popup-header">
+                  <div className="inc-popup-icon" style={{ background: sevBg, color: sevColor }}>
+                    <IncIcon />
+                  </div>
+                  <div className="inc-popup-header-text">
+                    <span className="inc-popup-title">{title}</span>
+                    <span className="inc-popup-sub">{dateStr || "Community Report"}</span>
+                  </div>
+                  <span className="inc-popup-sev" style={{ background: sevBg, color: sevColor }}>{sevLabel}</span>
+                </div>
+                {/* body */}
+                <div className="inc-popup-body">
+                  {r.description && r.description.trim() && (
+                    <p className="inc-popup-desc">&#34;{r.description.trim()}&#34;</p>
+                  )}
+                  <div className="inc-popup-rows">
+                    {r.locationText && (
+                      <div className="inc-popup-row">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                        <span>{r.locationText}</span>
+                      </div>
+                    )}
+                    {dateStr && (
+                      <div className="inc-popup-row">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        <span>{dateStr}</span>
+                      </div>
+                    )}
+                    {r.areaRating && (
+                      <div className="inc-popup-row">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="#f59e0b" stroke="#f59e0b" strokeWidth="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                        <span>Area Rating: {r.areaRating}/5</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {/* footer */}
+                <div className="inc-popup-footer">
+                  <span className="inc-popup-badge">Community Report</span>
+                  <span className="inc-popup-anon">{r.anonymous ? "Anonymous" : "Verified"}</span>
+                </div>
+              </div>
+            </Popup>
+          </Marker>
+        );
+      })}
     </>
   );
 }
@@ -1898,7 +2017,12 @@ export default function Dashboard() {
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
   const [travelMode, setTravelMode] = useState<TravelMode>("foot");
-  const [panelOpen, setPanelOpen] = useState(true);
+  const isMobile = useIsMobile();
+  const [panelOpen, setPanelOpen] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.innerWidth >= 768 : true
+  );
+  // Collapse on mobile when screen resizes to mobile
+  useEffect(() => { if (isMobile) setPanelOpen(false); }, [isMobile]);
   const [showPolice, setShowPolice] = useState(true);
   const [showIncidents, setShowIncidents] = useState(true);
   const [showHeatmap, setShowHeatmap] = useState(false);
@@ -1951,11 +2075,15 @@ export default function Dashboard() {
     staleTime: 5 * 60 * 1000,
   });
 
-  // Dedicated SafeCity nearby query — cached and clustered separately
+  // SafeCity incidents — always query from Pune city center with a 30 km
+  // city-wide radius so markers appear across the entire map regardless of
+  // where the user's GPS is. Limit 500 to capture all seeded + scraped data.
+  const safeCityLat = 18.5204;
+  const safeCityLng = 73.8567;
   const { data: safeCityIncidents = [] } = useQuery({
-    queryKey: ["safecity-near", overviewLat.toFixed(2), overviewLng.toFixed(2)],
-    queryFn: () => getSafeCityNearby({ lat: overviewLat, lng: overviewLng, radiusKm: 10, limit: 200 }),
-    staleTime: 5 * 60 * 1000,
+    queryKey: ["safecity-near", "pune-city-30km"],
+    queryFn: () => getSafeCityNearby({ lat: safeCityLat, lng: safeCityLng, radiusKm: 30, limit: 500 }),
+    staleTime: 10 * 60 * 1000,
   });
 
   // Hospital query — PMC healthcare facilities (with fallback to /all)
@@ -2627,28 +2755,25 @@ export default function Dashboard() {
             </MarkerClusterGroup>
           )}
 
-          {/* SafeCity incident markers — clustered to avoid clutter */}
+          {/* SafeCity incidents — clustered red markers */}
           {showSafeCityMarkers && safeCityIncidents.length > 0 && (
             <MarkerClusterGroup
               chunkedLoading
-              maxClusterRadius={60}
+              maxClusterRadius={55}
+              disableClusteringAtZoom={17}
               spiderfyOnMaxZoom
               showCoverageOnHover={false}
               iconCreateFunction={(cluster: any) => {
                 const count = cluster.getChildCount();
-                const size = count < 10 ? "small" : count < 50 ? "medium" : "large";
-                const px = size === "small" ? 30 : size === "medium" ? 40 : 50;
+                const px = count < 10 ? 30 : count < 30 ? 38 : 46;
                 return L.divIcon({
-                  html: `<div style="background:#dc2626;color:#fff;border-radius:50%;width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${px < 40 ? 11 : 13}px;box-shadow:0 2px 6px rgba(220,38,38,.4);border:2px solid #fff">${count}</div>`,
+                  html: `<div style="background:#dc2626;color:#fff;border-radius:50%;width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${px < 36 ? 11 : 13}px;box-shadow:0 2px 6px rgba(220,38,38,.5);border:2px solid #fff">${count}</div>`,
                   className: "",
                   iconSize: L.point(px, px),
                 });
               }}
             >
-              <SafeCityIncidentMarkerLayer
-                incidents={safeCityIncidents}
-                onViewDetails={handleViewSafeCityDetails}
-              />
+              <SafeCityIncidentMarkerLayer incidents={safeCityIncidents} onViewDetails={handleViewSafeCityDetails} />
             </MarkerClusterGroup>
           )}
 
@@ -2775,15 +2900,26 @@ export default function Dashboard() {
         )}
 
         {!navMode && <div
-          className="absolute left-2 right-2 md:left-3 md:right-auto top-2 md:top-3 z-[500] flex flex-col gap-2 md:w-[340px]"
-          style={{ maxHeight: "calc(100dvh - 80px)", overflowY: "visible", overflowX: "visible" }}
+          className={isMobile
+            ? "fixed bottom-0 left-0 right-0 z-[500]"
+            : "absolute left-3 top-3 z-[500] flex flex-col gap-2 w-[340px]"}
+          style={isMobile ? {} : { maxHeight: "calc(100dvh - 80px)", overflowY: "visible", overflowX: "visible" }}
         >
           {/* Search card */}
           <motion.div
-            initial={{ opacity: 0, y: -8 }}
+            initial={{ opacity: 0, y: isMobile ? 20 : -8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated overflow-hidden"
+            transition={{ duration: 0.22 }}
+            className={isMobile
+              ? "bg-card/98 backdrop-blur-xl border-t border-x border-border shadow-2xl rounded-t-2xl overflow-hidden"
+              : "rounded-2xl bg-card/95 backdrop-blur-xl border border-border shadow-elevated overflow-hidden"}
           >
+            {/* Drag handle — mobile only */}
+            {isMobile && (
+              <div className="flex justify-center pt-2.5 pb-0">
+                <div className="w-10 h-1 rounded-full bg-muted-foreground/25" />
+              </div>
+            )}
             <button
               onClick={() => setPanelOpen((p) => !p)}
               className="flex w-full items-center justify-between px-4 py-3 hover:bg-muted/40 transition-colors"
@@ -2792,9 +2928,9 @@ export default function Dashboard() {
                 <Navigation className="h-4 w-4 text-primary" />
                 Safe Route Finder
               </span>
-              {panelOpen
-                ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+              <motion.div animate={{ rotate: panelOpen ? 180 : 0 }} transition={{ duration: 0.2 }}>
+                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+              </motion.div>
             </button>
 
             <AnimatePresence initial={false}>
@@ -2804,9 +2940,13 @@ export default function Dashboard() {
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: "auto", opacity: 1 }}
                   exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.18 }}
+                  transition={{ duration: 0.2 }}
                   className="overflow-hidden"
                 >
+                  <div
+                    className={isMobile ? "overflow-y-auto overscroll-contain" : ""}
+                    style={isMobile ? { maxHeight: "62dvh", paddingBottom: "env(safe-area-inset-bottom, 12px)" } : {}}
+                  >
                   <div className="px-4 pb-4 space-y-2.5 border-t border-border">
                     {/* Origin */}
                     <div className="pt-3 space-y-1.5">
@@ -2924,13 +3064,61 @@ export default function Dashboard() {
                       ))}
                     </div>
                   </div>
+                  {/* Mobile-only: routes shown inside the scrollable sheet */}
+                  {isMobile && hasSearched && routes.length > 0 && (
+                    <div className="border-t border-border">
+                      <div className="px-4 pt-3 pb-1 border-b border-border/60 flex items-center justify-between">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Route Options</p>
+                        <span className="text-[10px] font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">{MODE_LABELS[travelMode]}</span>
+                      </div>
+                      <div className="px-3 py-2 space-y-2">
+                        {routes.map((route, i) => (
+                          <motion.div
+                            key={route.id}
+                            initial={{ opacity: 0, x: -8 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: i * 0.04 }}
+                            className={`rounded-xl border transition-all overflow-hidden ${selectedRoute?.id === route.id ? "border-primary bg-primary/5" : "border-transparent bg-muted/40 hover:bg-muted hover:border-border"}`}
+                          >
+                            <button onClick={() => pickRoute(route)} className="w-full text-left p-3">
+                              <div className="flex items-start justify-between gap-2 mb-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="h-2.5 w-2.5 rounded-full shrink-0 mt-0.5" style={{ background: route.color }} />
+                                  <span className="font-semibold text-sm leading-tight truncate">{route.name}</span>
+                                </div>
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border shrink-0 ${rsiBg2(route.rsi)}`}>
+                                  <span className={rsiColor2(route.rsi)}>RSI {route.rsi}</span>
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 text-xs text-muted-foreground ml-4">
+                                <span className="flex items-center gap-1"><Navigation className="h-3 w-3" />{route.distance}</span>
+                                <span>{route.duration}</span>
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase" style={{ background: route.color + "22", color: route.color }}>{route.type}</span>
+                              </div>
+                            </button>
+                            {selectedRoute?.id === route.id && (
+                              <div className="px-3 pb-3 flex gap-2 border-t border-border/40 pt-2">
+                                <Button className="flex-1 rounded-xl h-8 text-xs" onClick={() => { pickRoute(route); setNavMode(true); }}>
+                                  <Navigation className="h-3.5 w-3.5 mr-1" /> Navigate
+                                </Button>
+                                <Button variant="outline" className="rounded-xl h-8 text-xs" onClick={() => setShowEmergencyModal(true)}>
+                                  <Siren className="h-3.5 w-3.5 mr-1 text-red-500" /> SOS
+                                </Button>
+                              </div>
+                            )}
+                          </motion.div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  </div>{/* end overflow wrapper */}
                 </motion.div>
               )}
             </AnimatePresence>
           </motion.div>
 
-          {/* Routes list card — only shown after search */}
-          {hasSearched && routes.length > 0 && (
+          {/* Routes list card — desktop only */}
+          {!isMobile && hasSearched && routes.length > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
