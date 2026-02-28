@@ -33,8 +33,38 @@ type TravelMode = "foot" | "car" | "bike";
 const MODE_SPEED_KMH: Record<TravelMode, number> = { foot: 5, car: 40, bike: 15 };
 const MODE_LABELS: Record<TravelMode, string> = { foot: "Walking", car: "Car", bike: "Bike" };
 
+type RouteIncidentInput = {
+  lat: number;
+  lng: number;
+  severity: number;
+  areaRating?: number;
+  frequency?: number;
+  hotspotWeight?: number;
+  source?: "local" | "safecity";
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeSeverity(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return clamp(Math.round(value), 1, 3);
+  }
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "high") return 3;
+    if (v === "medium") return 2;
+    if (v === "low") return 1;
+    const parsed = Number(v);
+    if (Number.isFinite(parsed)) return clamp(Math.round(parsed), 1, 3);
+  }
+  return 2;
+}
+
 /* ─── Google Maps API config ─────────────────────────────────────────────── */
-setOptions({ apiKey: "AIzaSyBHQJgdFNDxvNZeeDp9sbQGWW7eFn1arm0", version: "weekly" });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(setOptions as any)({ apiKey: "AIzaSyBHQJgdFNDxvNZeeDp9sbQGWW7eFn1arm0", version: "weekly" });
 
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Leaflet icon fix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -143,19 +173,22 @@ function LocationInput({
   const [focused, setFocused] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const acRef = useRef<google.maps.places.AutocompleteService | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const acRef = useRef<any>(null);
   const showDrop = focused && suggestions.length > 0;
 
   // Initialise Google Places service via the new functional API
   useEffect(() => {
-    if (window.google?.maps?.places && !acRef.current) {
-      acRef.current = new window.google.maps.places.AutocompleteService();
+    const w = window as any;
+    if (w.google?.maps?.places && !acRef.current) {
+      acRef.current = new w.google.maps.places.AutocompleteService();
       return;
     }
     if (!acRef.current) {
       importLibrary("places").then(() => {
-        if (window.google?.maps?.places)
-          acRef.current = new window.google.maps.places.AutocompleteService();
+        const w2 = window as any;
+        if (w2.google?.maps?.places)
+          acRef.current = new w2.google.maps.places.AutocompleteService();
       }).catch(() => {});
     }
   }, []);
@@ -174,12 +207,12 @@ function LocationInput({
       {
         input: q + (q.toLowerCase().includes("pune") ? "" : " Pune"),
         componentRestrictions: { country: "IN" },
-        location: new window.google.maps.LatLng(18.5204, 73.8567),
+        location: new (window as any).google.maps.LatLng(18.5204, 73.8567),
         radius: 35000,
       },
-      (predictions, status) => {
+      (predictions: any, status: any) => {
         const google_sugg: Suggestion[] =
-          status === window.google.maps.places.PlacesServiceStatus.OK && predictions
+          status === (window as any).google?.maps?.places?.PlacesServiceStatus?.OK && predictions
             ? predictions.slice(0, 4).map((p) => ({
                 kind: "google" as const,
                 label: p.description,
@@ -187,9 +220,9 @@ function LocationInput({
               }))
             : [];
         // merge: local first, then google extras not already in local
-        const localNames = new Set(local.map((s) => s.loc.name.toLowerCase()));
+        const localNames = new Set(local.map((s) => s.kind === "local" ? s.loc.name.toLowerCase() : ""));
         const filtered = google_sugg.filter(
-          (g) => !localNames.has(g.label.split(",")[0].trim().toLowerCase())
+          (g) => g.kind === "google" && !localNames.has(g.label.split(",")[0].trim().toLowerCase())
         );
         setSuggestions([...local.slice(0, 3), ...filtered].slice(0, 7));
       }
@@ -214,8 +247,8 @@ function LocationInput({
     } else {
       // Geocode the Google Place to get lat/lng
       importLibrary("geocoding").then(() => {
-        const geocoder = new window.google.maps.Geocoder();
-        geocoder.geocode({ placeId: s.placeId }, (results, status) => {
+        const geocoder = new (window as any).google.maps.Geocoder();
+        geocoder.geocode({ placeId: s.placeId }, (results: any, status: any) => {
         if (status === "OK" && results?.[0]) {
           const g = results[0].geometry.location;
           const name = s.label.split(",")[0].trim();
@@ -483,13 +516,18 @@ function generateCheckpoints(
 async function fetchRealRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
-  incidentData: Array<{ lat: number; lng: number; severity: number; areaRating?: number }> = [],
+  incidentData: RouteIncidentInput[] = [],
   mode: TravelMode = "foot",
 ): Promise<RouteOption[]> {
   const computeRoutePenalty = (coords: [number, number][]) => {
-    if (!incidentData.length || !coords.length) return 0;
+    if (!incidentData.length || !coords.length) {
+      return { penalty: 0, repeatedNearby: 0, severeNearby: 0, blocked: false };
+    }
     const step = Math.max(1, Math.floor(coords.length / 80));
     let penalty = 0;
+    let repeatedNearby = 0;
+    let severeNearby = 0;
+
     incidentData.forEach((incident) => {
       let minDist = Infinity;
       for (let i = 0; i < coords.length; i += step) {
@@ -498,11 +536,35 @@ async function fetchRealRoutes(
         if (dist < minDist) minDist = dist;
       }
       if (minDist <= 1.2) {
+        const severity = normalizeSeverity(incident.severity);
         const ratingRisk = typeof incident.areaRating === "number" ? Math.max(0, 3 - incident.areaRating) : 0;
-        penalty += (incident.severity || 1) * (1.3 - Math.min(minDist, 1)) + ratingRisk * 1.5;
+        const frequency = Math.max(1, Math.round(incident.frequency ?? 1));
+        const hotspotWeight = clamp(incident.hotspotWeight ?? 0, 0, 1);
+
+        const proximityMultiplier =
+          minDist <= 0.2 ? 1.4 :
+          minDist <= 0.5 ? 1 :
+          0.65;
+
+        const severityPenalty = severity * 3.2 * proximityMultiplier;
+        const repeatPenalty = (frequency - 1) * 1.8 * proximityMultiplier;
+        const hotspotPenalty = hotspotWeight * 8 * proximityMultiplier;
+        const localSafetyPenalty = ratingRisk * 1.8;
+
+        penalty += severityPenalty + repeatPenalty + hotspotPenalty + localSafetyPenalty;
+
+        if (severity >= 3 && minDist <= 0.55) severeNearby += 1;
+        if (frequency >= 3 && minDist <= 0.65) repeatedNearby += 1;
       }
     });
-    return Math.min(35, Math.round(penalty));
+
+    const blocked = repeatedNearby >= 3 || severeNearby >= 4;
+    return {
+      penalty: Math.min(65, Math.round(penalty)),
+      repeatedNearby,
+      severeNearby,
+      blocked,
+    };
   };
 
   const COLOR = ["#22c55e", "#f59e0b", "#ef4444"];
@@ -515,12 +577,15 @@ async function fetchRealRoutes(
     ["Lowest ETA", "Direct road geometry", "Avoid if you prefer higher safety score"],
   ];
 
-  const toRoute = (raw: any, i: number): RouteOption => {
+  const toRoute = (raw: any, i: number): (RouteOption & { __blocked?: boolean }) => {
     const coords = raw.geometry.coordinates as [number, number][];
-    const routePenalty = computeRoutePenalty(coords);
-    const adjustedRsi = Math.max(20, BASE_RSI[Math.min(i, 2)] - routePenalty);
+    const routeRisk = computeRoutePenalty(coords);
+    const adjustedRsi = Math.max(8, BASE_RSI[Math.min(i, 2)] - routeRisk.penalty);
     const reasons = [...REASONS[Math.min(i, 2)]];
-    if (routePenalty >= 5) reasons.push("Community reports near this area lowered RSI");
+    if (routeRisk.penalty >= 5) reasons.push("Real incident reports near this route lowered RSI");
+    if (routeRisk.repeatedNearby >= 2) reasons.push("Repeated incidents detected along this corridor");
+    if (routeRisk.severeNearby >= 2) reasons.push("Multiple high-severity incidents close to this route");
+    if (routeRisk.blocked) reasons.push("Avoided due to frequent repeated high-risk incidents");
     // Recalculate duration from actual distance using the selected travel mode speed
     // (OSRM public server only has the driving profile, so raw.duration is always car-speed)
     const distKm = raw.distance / 1000;
@@ -540,6 +605,7 @@ async function fetchRealRoutes(
       coordinates: coords,
       steps: extractSteps(raw, speedScale),
       checkpoints: generateCheckpoints(coords, policeStations, MODE_SPEED_KMH[mode]),
+      __blocked: routeRisk.blocked,
     } as RouteOption & { steps?: any[] };
   };
 
@@ -591,7 +657,18 @@ async function fetchRealRoutes(
 
   // Sort: longest first (safest tends to go around), shortest last (fastest)
   collected.sort((a, b) => b.distance - a.distance);
-  return collected.slice(0, 3).map((raw, i) => toRoute(raw, i));
+  const scored = collected
+    .slice(0, 3)
+    .map((raw, i) => toRoute(raw, i))
+    .sort((a, b) => b.rsi - a.rsi);
+
+  const acceptable = scored.filter((r) => !r.__blocked && r.rsi >= 25);
+  if (acceptable.length >= 2) {
+    return acceptable.slice(0, 3).map(({ __blocked, ...route }) => route);
+  }
+
+  const fallback = scored.slice(0, 3).map(({ __blocked, ...route }) => route);
+  return fallback;
 }
 
 /* ── Gemini 2.5 Flash route safety analysis ── */
@@ -678,7 +755,7 @@ Reasons must be short, specific, safety-focused (e.g. street lighting, police pr
 async function fetchGoogleMapsRoutes(
   s: { lat: number; lng: number },
   e: { lat: number; lng: number },
-  incidentData: Array<{ lat: number; lng: number; severity: number }> = [],
+  incidentData: RouteIncidentInput[] = [],
   mode: TravelMode = "foot",
 ): Promise<RouteOption[]> {
   const COLOR_MAP = { safe: "#22c55e", moderate: "#f59e0b", risky: "#ef4444" };
@@ -744,18 +821,23 @@ async function fetchGoogleMapsRoutes(
   const aiResults  = await analyzeRoutesWithAI(routeStats, originName, destName, MODE_LABELS[mode]);
 
   // Step 4 — Merge AI analysis back into routes
-  return rawRoutes.map((r, i) => {
+  const merged = rawRoutes.map((r, i) => {
     const ai = aiResults[i];
     if (ai) {
-      const riskType = ai.risk === "safe" ? "safest" : ai.risk === "moderate" ? "moderate" : "fastest";
+      const aiRsi = Math.min(100, Math.max(10, Math.round(ai.rsi)));
+      const conservativeRsi = Math.min(aiRsi, r.rsi);
+      const riskType = conservativeRsi >= 80 ? "safest" : conservativeRsi >= 55 ? "moderate" : "fastest";
       return {
         ...r,
         id: `r${i + 1}`,
         name: ai.name || FALLBACK_NAMES[i],
         type: riskType as RouteOption["type"],
-        rsi: Math.min(100, Math.max(10, Math.round(ai.rsi))),
+        rsi: conservativeRsi,
         color: COLOR_MAP[ai.risk] ?? FALLBACK_COLOR[i],
-        reasons: ai.reasons?.length ? ai.reasons : FALLBACK_REASONS[i],
+        reasons: [
+          ...(ai.reasons?.length ? ai.reasons : FALLBACK_REASONS[i]),
+          ...(r.reasons ?? []),
+        ].slice(0, 5),
       };
     }
     // AI didn't return enough results — keep OSRM fallback values
@@ -764,11 +846,13 @@ async function fetchGoogleMapsRoutes(
       id: `r${i + 1}`,
       name: FALLBACK_NAMES[i],
       type: FALLBACK_TYPES[i],
-      rsi: FALLBACK_RSI[i],
+      rsi: Math.min(FALLBACK_RSI[i], r.rsi),
       color: FALLBACK_COLOR[i],
-      reasons: FALLBACK_REASONS[i],
+      reasons: [...(r.reasons ?? []), ...FALLBACK_REASONS[i]].slice(0, 5),
     };
   });
+
+  return merged.sort((a, b) => b.rsi - a.rsi);
 }
 
 function computeBearing(prev: { lat: number; lng: number }, next: { lat: number; lng: number }) {
@@ -1970,6 +2054,94 @@ export default function Dashboard() {
   }, [overview]);
   const mapClusters = overview?.clusters ?? [];
   const mapHeat = overview?.heatmap ?? [];
+
+  const routeIncidentData = useMemo<RouteIncidentInput[]>(() => {
+    const localFromReports: RouteIncidentInput[] = realReports
+      .filter((r) => Number.isFinite(r.latitude) && Number.isFinite(r.longitude))
+      .map((r) => ({
+        lat: r.latitude,
+        lng: r.longitude,
+        severity: normalizeSeverity(r.severity),
+        areaRating: typeof r.areaRating === "number" ? r.areaRating : undefined,
+        source: "local",
+      }));
+
+    const localFromOverview: RouteIncidentInput[] = mapIncidents
+      .filter((inc) => Number.isFinite(inc.lat) && Number.isFinite(inc.lng))
+      .map((inc) => ({
+        lat: inc.lat,
+        lng: inc.lng,
+        severity: normalizeSeverity(inc.severity),
+        areaRating: typeof (inc as any).areaRating === "number" ? (inc as any).areaRating : undefined,
+        source: "local",
+      }));
+
+    const safeCity: RouteIncidentInput[] = safeCityIncidents
+      .filter((inc) => Number.isFinite(inc.lat) && Number.isFinite(inc.lng))
+      .map((inc) => ({
+        lat: inc.lat,
+        lng: inc.lng,
+        severity: normalizeSeverity(inc.severity),
+        source: "safecity",
+      }));
+
+    const merged = [...localFromReports, ...localFromOverview, ...safeCity];
+    if (!merged.length) return [];
+
+    const freq = new globalThis.Map<string, { count: number; severityTotal: number }>();
+    merged.forEach((inc) => {
+      const key = `${inc.lat.toFixed(3)}:${inc.lng.toFixed(3)}`;
+      const prev = freq.get(key) || { count: 0, severityTotal: 0 };
+      prev.count += 1;
+      prev.severityTotal += normalizeSeverity(inc.severity);
+      freq.set(key, prev);
+    });
+
+    return merged.map((inc) => {
+      const key = `${inc.lat.toFixed(3)}:${inc.lng.toFixed(3)}`;
+      const stat = freq.get(key) || { count: 1, severityTotal: normalizeSeverity(inc.severity) };
+      const avgSeverity = stat.severityTotal / stat.count;
+      const hotspotWeight = clamp(((stat.count - 1) / 5) + ((avgSeverity - 1) / 2) * 0.55, 0, 1);
+      return {
+        ...inc,
+        severity: normalizeSeverity(inc.severity),
+        frequency: stat.count,
+        hotspotWeight,
+      };
+    });
+  }, [realReports, mapIncidents, safeCityIncidents]);
+
+  const incidentHeatRings = useMemo(() => {
+    if (!routeIncidentData.length) return [] as Array<{ lat: number; lng: number; weight: number; severity: number; count: number; level: "low" | "medium" | "high" }>;
+
+    const grid = new globalThis.Map<string, { lat: number; lng: number; count: number; severityTotal: number; riskTotal: number }>();
+    routeIncidentData.forEach((inc) => {
+      const key = `${inc.lat.toFixed(3)}:${inc.lng.toFixed(3)}`;
+      const prev = grid.get(key) || { lat: inc.lat, lng: inc.lng, count: 0, severityTotal: 0, riskTotal: 0 };
+      prev.count += 1;
+      const sev = normalizeSeverity(inc.severity);
+      prev.severityTotal += sev;
+      prev.riskTotal += sev + (inc.frequency ?? 1) * 0.5 + (inc.hotspotWeight ?? 0) * 2.5;
+      grid.set(key, prev);
+    });
+
+    return Array.from(grid.values()).map((g) => {
+      const avgSeverity = g.severityTotal / g.count;
+      const weight = clamp((g.riskTotal / Math.max(1, g.count * 6.5)), 0.2, 1);
+      const level: "low" | "medium" | "high" =
+        weight >= 0.72 || avgSeverity >= 2.7 ? "high" : weight >= 0.45 ? "medium" : "low";
+
+      return {
+        lat: g.lat,
+        lng: g.lng,
+        weight,
+        severity: avgSeverity,
+        count: g.count,
+        level,
+      };
+    });
+  }, [routeIncidentData]);
+
   const stationData  = overview?.policeStations?.length ? overview.policeStations : policeStations;
   const userArrowIcon = useMemo(() => makeUserArrowIcon(userHeading), [userHeading]);
 
@@ -2181,9 +2353,9 @@ export default function Dashboard() {
   useEffect(() => {
     if (!userLoc || !navMode) { setProximityAlert(false); return; }
     const nearHotspot = crimeHotspots.some((h) => haversineKm(userLoc.lat, userLoc.lng, h.lat, h.lng) < 0.35);
-    const nearIncident = mapIncidents.some((inc) => inc.severity >= 3 && haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 0.25);
+    const nearIncident = routeIncidentData.some((inc) => normalizeSeverity(inc.severity) >= 3 && haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 0.3);
     setProximityAlert(nearHotspot || nearIncident);
-  }, [userLoc, navMode, mapIncidents]);
+  }, [userLoc, navMode, routeIncidentData]);
 
   const handleSearch = async () => {
     const s = originLoc || resolveLocation2(origin);
@@ -2193,7 +2365,14 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchGoogleMapsRoutes(s, e, mapIncidents, travelMode);
+      const gen = await fetchGoogleMapsRoutes(s, e, routeIncidentData, travelMode);
+      if (!gen.length) {
+        setRoutes([]);
+        setSelectedRoute(null);
+        setHasSearched(false);
+        setSearchError("No safe route found for this destination right now. Try changing mode or endpoint.");
+        return;
+      }
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setHasSearched(true);
@@ -2216,8 +2395,14 @@ export default function Dashboard() {
     if (!s || !e) return;
     let cancelled = false;
     setIsSearching(true);
-    fetchGoogleMapsRoutes(s, e, mapIncidents, travelMode).then((gen) => {
+    fetchGoogleMapsRoutes(s, e, routeIncidentData, travelMode).then((gen) => {
       if (cancelled) return;
+      if (!gen.length) {
+        setSearchError("No safe route found for this destination right now. Try changing mode or endpoint.");
+        setRoutes([]);
+        setSelectedRoute(null);
+        return;
+      }
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setExpandedRouteId(gen[0]?.id ?? null);
@@ -2236,7 +2421,14 @@ export default function Dashboard() {
     setIsSearching(true);
     setSearchError("");
     try {
-      const gen = await fetchGoogleMapsRoutes(s, loc, mapIncidents, travelMode);
+      const gen = await fetchGoogleMapsRoutes(s, loc, routeIncidentData, travelMode);
+      if (!gen.length) {
+        setRoutes([]);
+        setSelectedRoute(null);
+        setHasSearched(false);
+        setSearchError("No safe route found for this destination right now. Try another nearby station.");
+        return;
+      }
       setRoutes(gen);
       setSelectedRoute(gen[0]);
       setHasSearched(true);
@@ -2246,7 +2438,7 @@ export default function Dashboard() {
     } finally {
       setIsSearching(false);
     }
-  }, [originLoc, userLoc, origin, mapIncidents, travelMode]);
+  }, [originLoc, userLoc, origin, routeIncidentData, travelMode]);
 
   const pickRoute = (r: RouteOption) => {
     setSelectedRoute(r);
@@ -2307,16 +2499,21 @@ export default function Dashboard() {
           {/* Heatmap visualization — hidden below zoom 11 to prevent opacity stacking */}
           {showHeatmap && (
             <ZoomGate minZoom={11}>
-              {mapIncidents.map((inc) => {
-                const color = inc.severity === 3 ? "#ef4444" : inc.severity === 2 ? "#f97316" : "#f59e0b";
-                const radius = inc.severity === 3 ? 260 : inc.severity === 2 ? 200 : 150;
+              {incidentHeatRings.map((ring, idx) => {
+                const color = ring.level === "high" ? "#ef4444" : ring.level === "medium" ? "#f97316" : "#f59e0b";
+                const radius = Math.round(150 + ring.weight * 300 + Math.min(ring.count, 8) * 18);
                 return (
                   <Circle
-                    key={`heat-inc-${inc.id}`}
-                    center={[inc.lat, inc.lng]}
+                    key={`heat-inc-${idx}`}
+                    center={[ring.lat, ring.lng]}
                     radius={radius}
-                    pathOptions={{ color, fillColor: color, fillOpacity: 0.12, weight: 0 }}
-                  />
+                    pathOptions={{ color, fillColor: color, fillOpacity: 0.15, weight: 0 }}
+                  >
+                    <Popup>
+                      <strong className="block text-sm">Incident Heat Level: {ring.level.toUpperCase()}</strong>
+                      <span className="text-xs text-muted-foreground">Reports in cluster: {ring.count}</span>
+                    </Popup>
+                  </Circle>
                 );
               })}
               {mapHeat.map((point, i) => {
@@ -2888,13 +3085,16 @@ export default function Dashboard() {
         {!navMode && userLoc && (() => {
           // Compute dynamic area RSI from nearby reports, hotspots, safe zones
           const nearReports   = realReports.filter((r) => haversineKm(userLoc.lat, userLoc.lng, r.latitude, r.longitude) < 2);
-          const nearIncidents = mapIncidents.filter((inc) => haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 2);
+          const nearIncidents = routeIncidentData.filter((inc) => haversineKm(userLoc.lat, userLoc.lng, inc.lat, inc.lng) < 2);
           const nearHotspots  = crimeHotspots.filter((h) => haversineKm(userLoc.lat, userLoc.lng, h.lat, h.lng) < 2);
           const nearSafe      = safeZones.filter((z) => haversineKm(userLoc.lat, userLoc.lng, z.lat, z.lng) < 2);
           const nearPolice    = stationData.filter((ps) => haversineKm(userLoc.lat, userLoc.lng, ps.lat, ps.lng) < 2);
 
           const reportPenalty  = nearReports.reduce((s, r) => s + (r.severity === "High" ? 5 : r.severity === "Medium" ? 3 : 1), 0);
-          const incidentPenalty = nearIncidents.reduce((s, inc) => s + (inc.severity || 1) * 2, 0);
+          const incidentPenalty = nearIncidents.reduce(
+            (sum, inc) => sum + normalizeSeverity(inc.severity) * (2 + ((inc.frequency ?? 1) - 1) * 0.4 + (inc.hotspotWeight ?? 0)),
+            0,
+          );
           const hotspotPenalty  = nearHotspots.reduce((s, h) => s + h.danger / 25, 0);
           const safeBonus       = nearSafe.length * 3 + nearPolice.length * 4;
           const rawScore        = Math.max(10, Math.min(100, 75 - reportPenalty - incidentPenalty - hotspotPenalty + safeBonus));

@@ -11,6 +11,9 @@ const SAFECITY_BASE = "https://webapp.safecity.in";
 const BATCH = 30;       // smaller batch = less likely to hit rate limits
 const DELAY = 500;      // slower = safer
 const MAX_ROUNDS = 60;  // 60 × 30 = 1800 max
+const TARGET_ENRICH = process.env.ENRICH_TARGET === "all"
+  ? Number.POSITIVE_INFINITY
+  : Math.max(1, Number(process.env.ENRICH_TARGET ?? 300));
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -60,14 +63,28 @@ function parseDetailResponse(raw) {
 async function main() {
   await mongoose.connect(MONGO_URL);
   const { default: SC } = await import("./model/safecityIncident.model.js");
+  const pendingQuery = { categories: "", description: "" };
 
-  const totalBare = await SC.countDocuments({ categories: "", description: "" });
-  console.log(`Starting enrichment: ${totalBare} bare records\n`);
+  const totalBare = await SC.countDocuments(pendingQuery);
+  const runTarget = Number.isFinite(TARGET_ENRICH) ? Math.min(totalBare, TARGET_ENRICH) : totalBare;
+  console.log(`Starting enrichment: ${totalBare} bare records`);
+  if (Number.isFinite(TARGET_ENRICH)) {
+    console.log(`Partial mode: will process up to ${runTarget} records this run\n`);
+  } else {
+    console.log(`Full mode: will process all remaining bare records\n`);
+  }
 
   let totalOk = 0, totalFail = 0, totalEmpty = 0;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const bare = await SC.find({ categories: "", description: "" }).sort({ scrapedAt: -1 }).limit(BATCH).lean();
+    if (totalOk + totalEmpty >= runTarget) {
+      console.log(`\nReached partial target (${runTarget} records). Stopping.`);
+      break;
+    }
+
+    const remainingTarget = runTarget - (totalOk + totalEmpty);
+    const batchSize = Math.max(1, Math.min(BATCH, remainingTarget));
+    const bare = await SC.find(pendingQuery).sort({ scrapedAt: -1 }).limit(batchSize).lean();
     if (!bare.length) { console.log(`\nNo more bare records at round ${round + 1}`); break; }
 
     let ok = 0, fail = 0, empty = 0;
