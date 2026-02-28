@@ -111,8 +111,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function getMapOverview() {
+export async function getMapOverview(params?: { lat?: number; lng?: number; radiusKm?: number }) {
   try {
+    const query = new URLSearchParams();
+    if (params?.lat) query.set("lat", String(params.lat));
+    if (params?.lng) query.set("lng", String(params.lng));
+    if (params?.radiusKm) query.set("radiusKm", String(params.radiusKm));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
     return await request<{
       center: [number, number];
       policeStations: PoliceStation[];
@@ -120,7 +125,7 @@ export async function getMapOverview() {
       clusters?: Array<{ id: string; lat: number; lng: number; count: number }>;
       routes: RouteOption[];
       heatmap: Array<{ lat: number; lng: number; weight: number }>;
-    }>("/api/map/overview");
+    }>(`/api/map/overview${suffix}`);
   } catch (err: any) {
     console.error("getMapOverview failed:", err);
     return {
@@ -432,6 +437,57 @@ export interface SafeCityCluster {
   count: number;
 }
 
+/* ── Hospital Types ── */
+export interface HospitalData {
+  id: string;
+  name: string;
+  facilityType: string;
+  wardNo: number;
+  wardName: string;
+  cityName: string;
+  lat: number;
+  lng: number;
+}
+
+/**
+ * GET /api/hospitals/near — hospitals near a point
+ */
+export async function getHospitalsNear(params: {
+  lat: number;
+  lng: number;
+  radiusKm?: number;
+  limit?: number;
+}): Promise<HospitalData[]> {
+  const query = new URLSearchParams({
+    lat: String(params.lat),
+    lng: String(params.lng),
+  });
+  if (params.radiusKm) query.set("radiusKm", String(params.radiusKm));
+  if (params.limit) query.set("limit", String(params.limit));
+  try {
+    const res = await request<{ hospitals: HospitalData[] }>(
+      `/api/hospitals/near?${query.toString()}`
+    );
+    console.log("[API] getHospitalsNear response:", res);
+    return res.hospitals ?? [];
+  } catch (err) {
+    console.error("[API] getHospitalsNear failed:", err);
+    return [];
+  }
+}
+
+/**
+ * GET /api/hospitals/all — all hospitals (static dataset)
+ */
+export async function getAllHospitals(): Promise<HospitalData[]> {
+  try {
+    const res = await request<{ hospitals: HospitalData[] }>("/api/hospitals/all");
+    return res.hospitals ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export interface SafeCityMapData {
   incidents: SafeCityIncident[];
   clusters: SafeCityCluster[];
@@ -443,6 +499,33 @@ export interface SafeCityAllData {
   categories: SafeCityCategory[];
   incidentDescriptions: any[];
   safetyDescriptions: any[];
+}
+
+/**
+ * Get nearby SafeCity incidents (geo-query, served from MongoDB cache)
+ */
+export async function getSafeCityNearby(params: {
+  lat: number;
+  lng: number;
+  radiusKm?: number;
+  limit?: number;
+  city?: string;
+}): Promise<SafeCityIncident[]> {
+  const query = new URLSearchParams({
+    lat: String(params.lat),
+    lng: String(params.lng),
+  });
+  if (params.radiusKm) query.set("radiusKm", String(params.radiusKm));
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.city) query.set("city", params.city);
+  try {
+    const res = await request<{ incidents: SafeCityIncident[] }>(
+      `/api/safecity/near?${query.toString()}`
+    );
+    return res.incidents ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /**

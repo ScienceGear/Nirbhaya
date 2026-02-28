@@ -150,13 +150,23 @@ async function scrapeAndCache({ centerLat, centerLng, radiusKm = 8, mapZoom = 13
   const ops = rawIncidents
     .map(parseSafeCityItem)
     .filter(Boolean)
-    .map((doc) => ({
-      updateOne: {
-        filter: { scId: doc.scId },
-        update: { $set: { ...doc, scrapedAt: new Date() } },
-        upsert: true,
-      },
-    }));
+    .map((doc) => {
+      // Only set coordinates / severity / timestamp unconditionally.
+      // Put enrichable fields (categories, description, etc.) in $setOnInsert
+      // so a fresh scrape never overwrites already-enriched data.
+      const { categories, description, locationText, dateText, timeText, age, gender, raw, ...core } = doc;
+      const enrichable = { categories, description, locationText, dateText, timeText, age, gender, raw };
+      return {
+        updateOne: {
+          filter: { scId: doc.scId },
+          update: {
+            $set: { ...core, scrapedAt: new Date() },
+            $setOnInsert: enrichable,
+          },
+          upsert: true,
+        },
+      };
+    });
 
   if (ops.length) {
     try {
@@ -168,6 +178,126 @@ async function scrapeAndCache({ centerLat, centerLng, radiusKm = 8, mapZoom = 13
   }
 
   _scrapedAreas.set(key, Date.now());
+
+  // Fire-and-forget: enrich unenriched incidents in background
+  enrichUnenrichedIncidents().catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BACKGROUND ENRICHMENT — fetch full details for bare records
+   ═══════════════════════════════════════════════════════════════ */
+
+let _enriching = false;
+const ENRICH_BATCH = 15; // fetch details for this many per round
+const ENRICH_DELAY_MS = 400; // ms between API calls to avoid rate-limiting
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Find incidents that have no categories/description (bare coordinate-only
+ * records) and fetch their full details from the SafeCity API, then update
+ * the MongoDB record so future reads have the rich data.
+ */
+async function enrichUnenrichedIncidents() {
+  if (_enriching) return; // only one round at a time
+  _enriching = true;
+  try {
+    const bare = await SafeCityIncident.find({
+      $or: [
+        { categories: "" },
+        { categories: { $exists: false } },
+      ],
+      description: "",
+    })
+      .sort({ scrapedAt: -1 })
+      .limit(ENRICH_BATCH)
+      .lean();
+
+    if (!bare.length) return;
+    console.log(`[SafeCity] Enriching ${bare.length} bare incidents…`);
+
+    let enriched = 0;
+    for (const doc of bare) {
+      try {
+        const data = await postSafeCity("/api/reported-incident/details", { incident_id: doc.scId });
+        const raw = data?.data ?? data ?? {};
+        const updates = parseDetailResponse(raw);
+
+        await SafeCityIncident.updateOne({ _id: doc._id }, {
+          $set: { ...updates, raw },
+        });
+        enriched++;
+      } catch {
+        /* skip failed detail fetches */
+      }
+      await sleep(ENRICH_DELAY_MS);
+    }
+    if (enriched) console.log(`[SafeCity] Enriched ${enriched}/${bare.length} incidents`);
+  } finally {
+    _enriching = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PARSE DETAIL RESPONSE  (shared by enrichment + getIncidentDetails)
+   ═══════════════════════════════════════════════════════════════ */
+
+/** Map raw SafeCity /reported-incident/details response to our DB fields. */
+function parseDetailResponse(raw) {
+  // Categories can be a pipe-separated string like "Stalking | Online Harassment"
+  let categories = "";
+  if (typeof raw?.categories === "string" && raw.categories.trim()) {
+    categories = raw.categories.trim();
+  } else if (Array.isArray(raw?.categories)) {
+    categories = raw.categories.map((c) => c?.name ?? c?.category_name ?? c).filter(Boolean).join(" | ");
+  } else if (raw?.category) {
+    categories = String(raw.category);
+  }
+
+  // Build location text from area + city
+  const locParts = [raw?.area, raw?.city, raw?.state].filter(Boolean);
+  const locationText = locParts.join(", ") || raw?.location || raw?.place || "";
+
+  // Build date text from incident_date
+  let dateText = "";
+  if (raw?.incident_date) {
+    try {
+      const d = new Date(raw.incident_date);
+      if (!isNaN(d.getTime())) {
+        dateText = d.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+      } else {
+        dateText = raw.incident_date;
+      }
+    } catch {
+      dateText = raw.incident_date;
+    }
+  } else if (raw?.date) {
+    dateText = raw.date;
+  }
+
+  // Build time text from time_from / time_to
+  let timeText = "";
+  const tfrom = raw?.time_from ?? raw?.answers?.primary?.time_from?.answer ?? "";
+  const tto   = raw?.time_to   ?? raw?.answers?.primary?.time_to?.answer   ?? "";
+  if (tfrom && tto) {
+    timeText = `${tfrom} - ${tto}`;
+  } else if (tfrom) {
+    timeText = tfrom;
+  } else if (raw?.time) {
+    timeText = raw.time;
+  }
+
+  return {
+    categories,
+    description: String(raw?.description ?? raw?.incident_text ?? ""),
+    locationText,
+    dateText,
+    timeText,
+    age: String(raw?.age ?? raw?.person_age ?? ""),
+    gender: String(raw?.gender ?? ""),
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -213,6 +343,9 @@ export async function getSafeCityNear({
 }) {
   // Fire-and-forget scrape (does not block the response)
   scrapeAndCache({ centerLat: lat, centerLng: lng, radiusKm, mapZoom, city }).catch(() => {});
+
+  // Also fire-and-forget enrichment on every query (idempotent, skips if already running)
+  enrichUnenrichedIncidents().catch(() => {});
 
   const docs = await SafeCityIncident.find({
     location: {
@@ -316,9 +449,12 @@ export async function getSafeCityMapData({
 export async function getIncidentDetails(incidentId) {
   if (!incidentId) throw new Error("Incident ID is required");
 
-  // 1. Try the local DB
+  // 1. Try the local DB — but only use it if it has enriched data
   const doc = await SafeCityIncident.findOne({ scId: String(incidentId) }).lean();
-  if (doc) {
+  const isBare = !doc?.categories && !doc?.description;
+
+  if (doc && !isBare) {
+    // Enriched record — return from DB
     const inc = docToIncident(doc);
     return {
       ...inc,
@@ -329,37 +465,55 @@ export async function getIncidentDetails(incidentId) {
     };
   }
 
-  // 2. Fallback: live API call
-  const data = await postSafeCity("/api/reported-incident/details", { incident_id: incidentId });
-  const raw = data?.data ?? data ?? {};
+  // 2. No record or bare record — fetch from SafeCity API
+  try {
+    const data = await postSafeCity("/api/reported-incident/details", { incident_id: incidentId });
+    const raw = data?.data ?? data ?? {};
+    const updates = parseDetailResponse(raw);
+    const lat = toNumber(raw.latitude ?? raw.lat);
+    const lng = toNumber(raw.longitude ?? raw.lng);
 
-  // Persist this detail into MongoDB for future lookups
-  const parsed = parseSafeCityItem({ ...raw, id: incidentId });
-  if (parsed) {
-    SafeCityIncident.updateOne(
-      { scId: parsed.scId },
-      { $set: { ...parsed, scrapedAt: new Date() } },
-      { upsert: true }
-    ).catch(() => {});
+    // Persist / update the MongoDB record
+    if (lat !== null && lng !== null) {
+      SafeCityIncident.updateOne(
+        { scId: String(incidentId) },
+        {
+          $set: {
+            ...updates,
+            location: { type: "Point", coordinates: [lng, lat] },
+            raw,
+            scrapedAt: new Date(),
+          },
+        },
+        { upsert: true }
+      ).catch(() => {});
+    }
+
+    return {
+      id: String(incidentId),
+      description: updates.description,
+      category: updates.categories,
+      categories: updates.categories,
+      lat: lat ?? doc?.location?.coordinates?.[1] ?? 0,
+      lng: lng ?? doc?.location?.coordinates?.[0] ?? 0,
+      location: updates.locationText,
+      dateText: updates.dateText,
+      timeText: updates.timeText,
+      age: updates.age,
+      gender: updates.gender,
+      createdAt: raw.created_on ?? raw.created_at ?? null,
+      verified: false,
+      anonymous: true,
+      raw,
+    };
+  } catch (err) {
+    // If API fails but we have a bare DB record, return that
+    if (doc) {
+      const inc = docToIncident(doc);
+      return { ...inc, category: "", createdAt: doc.timestamp, verified: false, raw: doc.raw || {} };
+    }
+    throw err;
   }
-
-  return {
-    id: String(incidentId),
-    description: raw.description ?? raw.incident_text ?? "",
-    category: raw.category ?? raw.incident_category ?? "",
-    categories: raw.category ?? raw.incident_category ?? "",
-    lat: toNumber(raw.lat ?? raw.latitude),
-    lng: toNumber(raw.lng ?? raw.longitude),
-    location: raw.location ?? raw.place ?? raw.city ?? "",
-    dateText: raw.date ?? raw.incident_date ?? "",
-    timeText: raw.time ?? raw.incident_time ?? "",
-    age: String(raw.age ?? raw.person_age ?? ""),
-    gender: String(raw.gender ?? raw.person_gender ?? ""),
-    createdAt: raw.created_at ?? null,
-    verified: raw.verified ?? false,
-    anonymous: true,
-    raw,
-  };
 }
 
 /* ── Categories (in-memory, rarely change) ── */

@@ -158,3 +158,291 @@
 .leaflet-tile-pane {
   background: #e8e4dc;
 }
+
+/* ═══════════════════════════════════════════════════
+   Leaflet popup overrides — clean card look
+   ═══════════════════════════════════════════════════ */
+.leaflet-popup-content-wrapper {
+  border-radius: 14px !important;
+  padding: 0 !important;
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0,0,0,.12), 0 1.5px 6px rgba(0,0,0,.06) !important;
+  border: 1px solid rgba(0,0,0,.06) !important;
+  background: #fff !important;
+}
+.leaflet-popup-content {
+  margin: 0 !important;
+  width: auto !important;
+  font-family: 'DM Sans','Inter',system-ui,sans-serif;
+}
+.leaflet-popup-tip {
+  box-shadow: 0 2px 8px rgba(0,0,0,.08) !important;
+}
+.leaflet-popup-close-button { display: none !important; }
+
+/* ═══════════════════════════════════════════════════
+   SafeCity — Map Popup
+   ═══════════════════════════════════════════════════ */
+.sc-popup-root {
+  min-width: 260px;
+  max-width: 300px;
+  margin: -1px;
+  overflow: hidden;
+}
+.sc-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, #1c1917 0%, #292524 100%);
+}
+.sc-popup-header-icon {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: rgba(239,68,68,.2);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.sc-popup-header-text { flex: 1; min-width: 0; }
+.sc-popup-title {
+  color: #fff; font-size: 13px; font-weight: 600;
+  line-height: 1.3; margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sc-popup-sub {
+  color: rgba(255,255,255,.5); font-size: 11px; margin-top: 1px;
+  display: block;
+}
+.sc-popup-body { padding: 12px 16px 14px; }
+.sc-popup-desc {
+  font-size: 12.5px; color: #4b5563; line-height: 1.55;
+  margin: 0 0 10px;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.sc-popup-meta {
+  display: flex; flex-direction: column; gap: 7px;
+}
+.sc-popup-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.sc-popup-row svg { flex-shrink: 0; opacity: .7; }
+.sc-popup-row span {
+  font-size: 12px; color: #374151; line-height: 1.35;
+}
+.sc-popup-empty {
+  font-size: 12px; color: #a1a1aa; margin: 0;
+  font-style: italic;
+}
+.sc-popup-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid #f4f4f5;
+}
+.sc-popup-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: .3px;
+  color: #a1a1aa; text-transform: uppercase;
+}
+.sc-popup-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 14px; border: none; border-radius: 8px;
+  background: #18181b; color: #fff;
+  font-size: 11.5px; font-weight: 600; cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+.sc-popup-btn:hover {
+  background: #27272a; transform: translateY(-1px);
+}
+.sc-popup-btn:active { transform: translateY(0); }
+
+/* ═══════════════════════════════════════════════════
+   SafeCity — Detail Modal
+   ═══════════════════════════════════════════════════ */
+.sc-modal {
+  position: relative;
+  max-width: 420px; width: 100%;
+  background: #fff;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.04),
+    0 8px 40px rgba(0,0,0,.12),
+    0 2px 8px rgba(0,0,0,.06);
+}
+.sc-modal-close {
+  position: absolute; top: 14px; right: 14px; z-index: 2;
+  width: 30px; height: 30px; border-radius: 8px;
+  border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.05); color: #71717a;
+  transition: background .15s, color .15s;
+}
+.sc-modal-close:hover { background: rgba(0,0,0,.08); color: #18181b; }
+.sc-modal-accent {
+  height: 4px; width: 100%;
+  background: linear-gradient(90deg, #dc2626, #f97316, #dc2626);
+}
+.sc-modal-inner { padding: 20px 22px 18px; }
+.sc-modal-title-section {
+  display: flex; align-items: flex-start; gap: 12px;
+  margin-bottom: 16px;
+}
+.sc-modal-icon {
+  width: 40px; height: 40px; border-radius: 10px;
+  background: #fef2f2; color: #dc2626;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.sc-modal-title {
+  font-size: 17px; font-weight: 700; color: #18181b;
+  line-height: 1.3; margin: 0;
+}
+.sc-modal-meta {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+  flex-wrap: wrap;
+}
+.sc-modal-meta-item {
+  font-size: 12.5px; color: #71717a;
+}
+.sc-modal-id {
+  font-size: 11px; color: #a1a1aa;
+  background: #f4f4f5; padding: 2px 7px; border-radius: 4px;
+  font-weight: 500;
+}
+.sc-modal-loading {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 10px; padding: 32px 0;
+  color: #a1a1aa; font-size: 13px;
+}
+.sc-modal-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 2.5px solid #f4f4f5; border-top-color: #dc2626;
+  animation: spin .8s linear infinite;
+}
+.sc-modal-desc {
+  font-size: 14px; line-height: 1.65; color: #374151;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: #fafafa; border-radius: 10px;
+  border: 1px solid #f4f4f5;
+}
+.sc-modal-rows {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-bottom: 16px;
+  border-radius: 12px; overflow: hidden;
+  border: 1px solid #f4f4f5;
+}
+.sc-modal-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: #fafafa;
+  transition: background .1s;
+}
+.sc-modal-row:hover { background: #f4f4f5; }
+.sc-modal-row + .sc-modal-row { border-top: 1px solid #ebebeb; }
+.sc-modal-row-icon {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.sc-modal-row-icon--red  { background: #fef2f2; color: #ef4444; }
+.sc-modal-row-icon--blue { background: #eff6ff; color: #3b82f6; }
+.sc-modal-row-icon--amber{ background: #fffbeb; color: #f59e0b; }
+.sc-modal-row-content { flex: 1; min-width: 0; }
+.sc-modal-row-label {
+  display: block; font-size: 10px; font-weight: 600;
+  color: #a1a1aa; text-transform: uppercase; letter-spacing: .6px;
+  margin-bottom: 1px;
+}
+.sc-modal-row-value {
+  display: block; font-size: 13.5px; color: #27272a;
+  line-height: 1.35;
+}
+.sc-modal-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-top: 14px; border-top: 1px solid #f4f4f5;
+}
+.sc-modal-source { display: flex; align-items: center; gap: 8px; }
+.sc-modal-source-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase;
+  padding: 3px 8px; border-radius: 5px;
+  background: #18181b; color: #fff;
+}
+.sc-modal-source-id { font-size: 11.5px; color: #a1a1aa; }
+.sc-modal-link {
+  font-size: 11.5px; color: #a1a1aa;
+  text-decoration: none;
+  display: flex; align-items: center; gap: 4px;
+  transition: color .15s;
+}
+.sc-modal-link:hover { color: #dc2626; }
+
+/* ═══════════════════════════════════════════════════════
+   Hospital — Map Popup
+   ═══════════════════════════════════════════════════════ */
+.hosp-popup-root {
+  min-width: 240px;
+  max-width: 290px;
+  margin: -1px;
+  overflow: hidden;
+}
+.hosp-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #14532d 0%, #166534 100%);
+}
+.hosp-popup-header-icon {
+  width: 30px; height: 30px; border-radius: 8px;
+  background: rgba(255,255,255,.15);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.hosp-popup-header-text { flex: 1; min-width: 0; }
+.hosp-popup-title {
+  color: #fff; font-size: 12.5px; font-weight: 600;
+  line-height: 1.3; margin: 0;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.hosp-popup-sub {
+  color: rgba(255,255,255,.5); font-size: 10.5px; margin-top: 2px;
+  display: block;
+}
+.hosp-popup-body { padding: 10px 14px 12px; }
+.hosp-popup-meta {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.hosp-popup-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.hosp-popup-row svg { flex-shrink: 0; opacity: .7; }
+.hosp-popup-row span {
+  font-size: 11.5px; color: #374151; line-height: 1.35;
+}
+.hosp-popup-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid #f0fdf4;
+}
+.hosp-popup-badge {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .3px;
+  color: #16a34a; text-transform: uppercase;
+}
+.hosp-popup-nav-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 12px; border: none; border-radius: 7px;
+  background: #16a34a; color: #fff;
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  text-decoration: none;
+  transition: background .15s, transform .1s;
+}
+.hosp-popup-nav-btn:hover {
+  background: #15803d; transform: translateY(-1px);
+}
+.hosp-popup-nav-btn:active { transform: translateY(0); }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

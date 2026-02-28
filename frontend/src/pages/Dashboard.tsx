@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Search, Navigation, Shield, Layers, AlertTriangle, MapPin, Phone,
   Home, Map, Siren, FileWarning, Settings, Sun, Moon, LogOut, Star,
-  User, ChevronDown, ChevronUp, X, Share2, ShieldCheck,
+  User, ChevronDown, ChevronUp, X, Share2, ShieldCheck, Heart,
   Activity, Crosshair, ArrowUp, CornerUpRight, LocateFixed, Locate, BatteryLow,
   Car, Bike, Footprints,
 } from "lucide-react";
@@ -24,7 +24,7 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, Polygon, useM
 import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
 import { useQuery } from "@tanstack/react-query";
-import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, getSafeCityIncidentDetails, type MapReport, type HexZoneData, type SafeCityIncident, type SafeCityIncidentDetails } from "@/lib/api";
+import { getCrowdHeatmap, getMapOverview, updateLocation, saveTripHistory, getAllReportsForMap, getHexZones, reverseGeocode, getSafeCityIncidentDetails, getSafeCityNearby, getHospitalsNear, type MapReport, type HexZoneData, type SafeCityIncident, type SafeCityIncidentDetails, type HospitalData } from "@/lib/api";
 import { cellToBoundary } from "h3-js";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 
@@ -1094,12 +1094,14 @@ function PoliceClusterLayer({
   onNavigateTo: (name: string, lat: number, lng: number) => void;
 }) {
   const zoom = useMapZoom();
-  if (zoom < 10) return null;
   const icon = useMemo(() => makeZoomIcon("#1d4ed8", SVG_SHIELD, zoom), [zoom]);
   return (
     <MarkerClusterGroup
       chunkedLoading
-      maxClusterRadius={50}
+      maxClusterRadius={60}
+      disableClusteringAtZoom={17}
+      spiderfyOnMaxZoom
+      showCoverageOnHover={false}
       iconCreateFunction={(cluster: { getChildCount: () => number }) => {
         const count = cluster.getChildCount();
         const size = count < 10 ? 36 : count < 20 ? 42 : 48;
@@ -1134,7 +1136,7 @@ function PoliceClusterLayer({
 function IncidentMarkerLayer({ reports }: { reports: MapReport[] }) {
   const zoom = useMapZoom();
   const icon = useMemo(() => makeZoomIcon("#ef4444", SVG_WARNING, zoom), [zoom]);
-  if (zoom < 9) return null;
+  if (!reports.length) return null;
   return (
     <>
       {reports.map((r) => (
@@ -1163,46 +1165,73 @@ function SafeCityIncidentMarkerLayer({
 }) {
   const zoom = useMapZoom();
   const icon = useMemo(() => makeZoomIcon("#dc2626", SVG_SAFECITY, zoom), [zoom]);
-  if (zoom < 11 || !incidents.length) return null;
+  if (!incidents.length) return null;
   return (
     <>
       {incidents.map((inc) => {
         const dateStr = inc.dateText || (inc.timestamp ? new Date(inc.timestamp).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "");
+        const hasType = !!(inc.categories);
+        const hasLoc = !!(inc.location);
+        const hasDate = !!(dateStr || inc.timeText);
+        const hasAnyDetail = hasType || hasLoc || hasDate;
         return (
           <Marker key={`sc-inc-${inc.id}`} position={[inc.lat, inc.lng]} icon={icon}>
             <Popup>
-              <div style={{ minWidth: 220, maxWidth: 280, fontFamily: "system-ui, sans-serif" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                  <span style={{ background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, letterSpacing: 0.5 }}>SafeCity</span>
-                  <span style={{ color: "#6b7280", fontSize: 11 }}>#{inc.id}</span>
+              <div className="sc-popup-root">
+                {/* ── Compact header ── */}
+                <div className="sc-popup-header">
+                  <div className="sc-popup-header-icon">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                  </div>
+                  <div className="sc-popup-header-text">
+                    <span className="sc-popup-title">{hasType ? inc.categories : `Incident Report`}</span>
+                    <span className="sc-popup-sub">
+                      {inc.age ? `${inc.age} Yrs` : ""}{inc.age && inc.gender ? " · " : ""}{inc.gender || ""}
+                      {!inc.age && !inc.gender ? `#${inc.id}` : ""}
+                    </span>
+                  </div>
                 </div>
-                {inc.categories && (
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "#1f2937", marginBottom: 4 }}>
-                    <span style={{ color: "#6b7280", fontWeight: 400 }}>Type: </span>
-                    #{inc.id} {inc.categories}
+
+                {/* ── Body ── */}
+                <div className="sc-popup-body">
+                  {inc.description && inc.description !== "Reported incident" && (
+                    <p className="sc-popup-desc">{inc.description}</p>
+                  )}
+
+                  <div className="sc-popup-meta">
+                    {hasLoc && (
+                      <div className="sc-popup-row">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                        <span>{inc.location}</span>
+                      </div>
+                    )}
+                    {hasDate && (
+                      <div className="sc-popup-row">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        <span>{dateStr}</span>
+                      </div>
+                    )}
+                    {inc.timeText && (
+                      <div className="sc-popup-row">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <span>Between {inc.timeText}</span>
+                      </div>
+                    )}
                   </div>
-                )}
-                {inc.location && (
-                  <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 2 }}>
-                    <span style={{ fontWeight: 500 }}>Location: </span>{inc.location}
+
+                  {!hasAnyDetail && (
+                    <p className="sc-popup-empty">Report #{inc.id} — details loading…</p>
+                  )}
+
+                  {/* Footer */}
+                  <div className="sc-popup-footer">
+                    <span className="sc-popup-badge">SafeCity <span style={{opacity:.6}}>#{inc.id}</span></span>
+                    <button className="sc-popup-btn" onClick={(e) => { e.stopPropagation(); onViewDetails(inc); }}>
+                      View Details
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                    </button>
                   </div>
-                )}
-                {(dateStr || inc.timeText) && (
-                  <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 6 }}>
-                    <span style={{ fontWeight: 500 }}>Date & Time: </span>
-                    {dateStr}{inc.timeText ? ` between ${inc.timeText}` : ""}
-                  </div>
-                )}
-                <button
-                  onClick={(e) => { e.stopPropagation(); onViewDetails(inc); }}
-                  style={{
-                    display: "block", width: "100%", marginTop: 4, padding: "5px 0",
-                    background: "#dc2626", color: "#fff", border: "none", borderRadius: 4,
-                    fontSize: 12, fontWeight: 600, cursor: "pointer", textAlign: "center",
-                  }}
-                >
-                  View more details
-                </button>
+                </div>
               </div>
             </Popup>
           </Marker>
@@ -1226,7 +1255,6 @@ function SafeCityDetailModal({
 }) {
   if (!incident) return null;
 
-  const data = details || incident;
   const categories = details?.categories || details?.category || incident.categories || "";
   const description = details?.description || incident.description || "";
   const location = details?.location || (incident as any).location || "";
@@ -1243,86 +1271,107 @@ function SafeCityDetailModal({
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
-        style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}
+        style={{ background: "rgba(0,0,0,0.45)" }}
         onClick={onClose}
       >
         <motion.div
-          initial={{ scale: 0.9, opacity: 0, y: 20 }}
+          initial={{ scale: 0.95, opacity: 0, y: 24 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
-          exit={{ scale: 0.9, opacity: 0, y: 20 }}
-          transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="rounded-xl shadow-2xl max-w-md w-full overflow-hidden"
-          style={{ background: "var(--background, #fff)", color: "var(--foreground, #1f2937)" }}
+          exit={{ scale: 0.95, opacity: 0, y: 24 }}
+          transition={{ type: "spring", damping: 30, stiffness: 400 }}
+          className="sc-modal"
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Header */}
-          <div className="px-5 py-4 border-b" style={{ borderColor: "var(--border, #e5e7eb)" }}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                  <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400" />
-                </div>
-                <div>
-                  <div className="font-semibold text-sm">{categories || "Incident Report"}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {age && `${age} Yrs`}{age && gender && " | "}{gender}
-                  </div>
+          {/* ── Close button ── */}
+          <button className="sc-modal-close" onClick={onClose}>
+            <X className="w-4 h-4" />
+          </button>
+
+          {/* ── Header stripe ── */}
+          <div className="sc-modal-accent" />
+
+          <div className="sc-modal-inner">
+            {/* Category title */}
+            <div className="sc-modal-title-section">
+              <div className="sc-modal-icon">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="sc-modal-title">{categories || "Incident Report"}</h3>
+                <div className="sc-modal-meta">
+                  {(age || gender) && (
+                    <span className="sc-modal-meta-item">
+                      {age && `${age} Yrs`}{age && gender ? " · " : ""}{gender}
+                    </span>
+                  )}
+                  <span className="sc-modal-id">#{incident.id}</span>
                 </div>
               </div>
-              <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-                <X className="w-5 h-5" />
-              </button>
             </div>
-          </div>
 
-          {/* Body */}
-          <div className="px-5 py-4 space-y-3">
             {loading ? (
-              <div className="flex items-center justify-center py-8">
-                <div className="w-6 h-6 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-                <span className="ml-2 text-sm text-muted-foreground">Loading details...</span>
+              <div className="sc-modal-loading">
+                <div className="sc-modal-spinner" />
+                <span>Loading details…</span>
               </div>
             ) : (
               <>
                 {/* Description */}
                 {description && description !== "Reported incident" && (
-                  <p className="text-sm leading-relaxed" style={{ color: "var(--foreground, #374151)" }}>
-                    {description}
-                  </p>
+                  <p className="sc-modal-desc">{description}</p>
                 )}
 
-                {/* Meta info */}
-                <div className="space-y-2 text-sm">
+                {/* Info rows */}
+                <div className="sc-modal-rows">
                   {location && (
-                    <div className="flex items-start gap-2">
-                      <MapPin className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                      <span>{location}</span>
+                    <div className="sc-modal-row">
+                      <div className="sc-modal-row-icon sc-modal-row-icon--red">
+                        <MapPin className="w-4 h-4" />
+                      </div>
+                      <div className="sc-modal-row-content">
+                        <span className="sc-modal-row-label">Location</span>
+                        <span className="sc-modal-row-value">{location}</span>
+                      </div>
                     </div>
                   )}
                   {dateFormatted && (
-                    <div className="flex items-start gap-2">
-                      <svg className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
-                      </svg>
-                      <span>Around {dateFormatted}</span>
+                    <div className="sc-modal-row">
+                      <div className="sc-modal-row-icon sc-modal-row-icon--blue">
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+                        </svg>
+                      </div>
+                      <div className="sc-modal-row-content">
+                        <span className="sc-modal-row-label">Date</span>
+                        <span className="sc-modal-row-value">Around {dateFormatted}</span>
+                      </div>
                     </div>
                   )}
                   {timeText && (
-                    <div className="flex items-start gap-2">
-                      <svg className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
-                      </svg>
-                      <span>Between {timeText}</span>
+                    <div className="sc-modal-row">
+                      <div className="sc-modal-row-icon sc-modal-row-icon--amber">
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                        </svg>
+                      </div>
+                      <div className="sc-modal-row-content">
+                        <span className="sc-modal-row-label">Time</span>
+                        <span className="sc-modal-row-value">Between {timeText}</span>
+                      </div>
                     </div>
                   )}
                 </div>
 
-                {/* Source badge */}
-                <div className="flex items-center gap-2 pt-2 border-t" style={{ borderColor: "var(--border, #e5e7eb)" }}>
-                  <span className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 font-medium">
-                    SafeCity Report #{incident.id}
-                  </span>
-                  <span className="text-xs text-muted-foreground">via webapp.safecity.in</span>
+                {/* Footer */}
+                <div className="sc-modal-footer">
+                  <div className="sc-modal-source">
+                    <span className="sc-modal-source-badge">SafeCity</span>
+                    <span className="sc-modal-source-id">Report #{incident.id}</span>
+                  </div>
+                  <a href="https://webapp.safecity.in/" target="_blank" rel="noopener noreferrer" className="sc-modal-link">
+                    webapp.safecity.in
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  </a>
                 </div>
               </>
             )}
@@ -1330,6 +1379,69 @@ function SafeCityDetailModal({
         </motion.div>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+/* ── Hospital Marker Layer — PMC healthcare facilities ── */
+const SVG_HOSPITAL_CROSS = `<path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2z" fill="rgba(255,255,255,.15)" stroke-width="0"/><line x1="12" y1="7" x2="12" y2="17" stroke-width="2.5"/><line x1="7" y1="12" x2="17" y2="12" stroke-width="2.5"/>`;
+
+/** Static hospital icon (no zoom hook — safe inside MarkerClusterGroup) */
+const HOSPITAL_ICON = L.divIcon({
+  className: "",
+  html: `<div style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#16a34a;border:2px solid #fff;box-shadow:0 2px 8px rgba(22,163,74,.5)">
+    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${SVG_HOSPITAL_CROSS}</svg>
+  </div>`,
+  iconSize: [24, 24], iconAnchor: [12, 12],
+});
+
+function HospitalMarkerLayer({ hospitals }: { hospitals: HospitalData[] }) {
+  if (!hospitals.length) return null;
+  return (
+    <>
+      {hospitals.map((h) => (
+        <Marker key={`hosp-${h.id}`} position={[h.lat, h.lng]} icon={HOSPITAL_ICON}>
+          <Popup>
+            <div className="hosp-popup-root">
+              <div className="hosp-popup-header">
+                <div className="hosp-popup-header-icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2z"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="7" y1="12" x2="17" y2="12"/>
+                  </svg>
+                </div>
+                <div className="hosp-popup-header-text">
+                  <span className="hosp-popup-title">{h.name}</span>
+                  <span className="hosp-popup-sub">{h.facilityType}</span>
+                </div>
+              </div>
+              <div className="hosp-popup-body">
+                <div className="hosp-popup-meta">
+                  <div className="hosp-popup-row">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    <span>{h.wardName}</span>
+                  </div>
+                  <div className="hosp-popup-row">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
+                    <span>Ward {h.wardNo} · {h.cityName}</span>
+                  </div>
+                </div>
+                <div className="hosp-popup-footer">
+                  <span className="hosp-popup-badge">PMC Healthcare</span>
+                  <a
+                    href={`https://www.google.com/maps/dir/?api=1&destination=${h.lat},${h.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hosp-popup-nav-btn"
+                  >
+                    Navigate
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </Popup>
+        </Marker>
+      ))}
+    </>
   );
 }
 
@@ -1726,6 +1838,7 @@ export default function Dashboard() {
   const [safeCityDetails, setSafeCityDetails] = useState<SafeCityIncidentDetails | null>(null);
   const [safeCityDetailLoading, setSafeCityDetailLoading] = useState(false);
   const [showSafeCityMarkers, setShowSafeCityMarkers] = useState(true);
+  const [showHospitals, setShowHospitals] = useState(true);
 
   const handleViewSafeCityDetails = useCallback(async (inc: SafeCityIncident) => {
     setSafeCityDetailIncident(inc);
@@ -1745,10 +1858,44 @@ export default function Dashboard() {
   const [batteryCharging, setBatteryCharging] = useState(false);
   const [lowBatteryDismissed, setLowBatteryDismissed] = useState(false);
 
+  const overviewLat = userLoc?.lat ?? originLoc?.lat ?? PUNE_CENTER[1];
+  const overviewLng = userLoc?.lng ?? originLoc?.lng ?? PUNE_CENTER[0];
+
   const { data: overview } = useQuery({
-    queryKey: ["map-overview"],
-    queryFn: getMapOverview,
+    queryKey: ["map-overview", overviewLat.toFixed(2), overviewLng.toFixed(2)],
+    queryFn: () => getMapOverview({ lat: overviewLat, lng: overviewLng, radiusKm: 10 }),
     staleTime: 5 * 60 * 1000,
+  });
+
+  // Dedicated SafeCity nearby query — cached and clustered separately
+  const { data: safeCityIncidents = [] } = useQuery({
+    queryKey: ["safecity-near", overviewLat.toFixed(2), overviewLng.toFixed(2)],
+    queryFn: () => getSafeCityNearby({ lat: overviewLat, lng: overviewLng, radiusKm: 10, limit: 200 }),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  // Hospital query — PMC healthcare facilities (with fallback to /all)
+  const { data: hospitalData = [] } = useQuery({
+    queryKey: ["hospitals-near", overviewLat.toFixed(2), overviewLng.toFixed(2)],
+    queryFn: async () => {
+      console.log("[Hospitals] fetching near", overviewLat, overviewLng);
+      try {
+        const result = await getHospitalsNear({ lat: overviewLat, lng: overviewLng, radiusKm: 15, limit: 100 });
+        if (result.length > 0) {
+          console.log("[Hospitals] got", result.length, "results from /near");
+          return result;
+        }
+      } catch (e) {
+        console.warn("[Hospitals] /near failed, trying /all:", e);
+      }
+      // Fallback: fetch all hospitals
+      const { getAllHospitals } = await import("@/lib/api");
+      const all = await getAllHospitals();
+      console.log("[Hospitals] fallback /all returned", all.length, "results");
+      return all;
+    },
+    staleTime: 10 * 60 * 1000,
+    retry: 2,
   });
 
   const crowdQueryLat = userLoc?.lat ?? originLoc?.lat ?? PUNE_CENTER[1];
@@ -1816,7 +1963,11 @@ export default function Dashboard() {
     };
   }, [realReports, userLoc]);
 
-  const mapIncidents = overview?.incidents ?? [];
+  // mapIncidents = local reports only (filter out SafeCity which have type "safecity")
+  const mapIncidents = useMemo(() => {
+    const all = overview?.incidents ?? [];
+    return all.filter((inc) => (inc as any).type !== "safecity");
+  }, [overview]);
   const mapClusters = overview?.clusters ?? [];
   const mapHeat = overview?.heatmap ?? [];
   const stationData  = overview?.policeStations?.length ? overview.policeStations : policeStations;
@@ -2242,7 +2393,7 @@ export default function Dashboard() {
                       color,
                       fillColor: color,
                       fillOpacity,
-                      weight: 1,
+                      weight: 3,
                       opacity: norm === 0 ? 0.3 : 0.5,
                     }}
                   >
@@ -2257,18 +2408,77 @@ export default function Dashboard() {
           )}
 
           {/* Real user-reported incidents on map — zoom-aware */}
-          {showIncidents && <IncidentMarkerLayer reports={realReports} />}
+          {/* Real user-reported incidents — clustered */}
+          {showIncidents && realReports.length > 0 && (
+            <MarkerClusterGroup
+              chunkedLoading
+              maxClusterRadius={55}
+              disableClusteringAtZoom={17}
+              spiderfyOnMaxZoom
+              showCoverageOnHover={false}
+              iconCreateFunction={(cluster: any) => {
+                const count = cluster.getChildCount();
+                const px = count < 10 ? 30 : count < 30 ? 38 : 46;
+                return L.divIcon({
+                  html: `<div style="background:#ef4444;color:#fff;border-radius:50%;width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${px < 36 ? 11 : 13}px;box-shadow:0 2px 6px rgba(239,68,68,.45);border:2px solid #fff">${count}</div>`,
+                  className: "",
+                  iconSize: L.point(px, px),
+                });
+              }}
+            >
+              <IncidentMarkerLayer reports={realReports} />
+            </MarkerClusterGroup>
+          )}
 
-          {/* SafeCity incident markers — clickable with rich popups */}
-          {showSafeCityMarkers && (
-            <SafeCityIncidentMarkerLayer
-              incidents={mapIncidents as SafeCityIncident[]}
-              onViewDetails={handleViewSafeCityDetails}
-            />
+          {/* SafeCity incident markers — clustered to avoid clutter */}
+          {showSafeCityMarkers && safeCityIncidents.length > 0 && (
+            <MarkerClusterGroup
+              chunkedLoading
+              maxClusterRadius={60}
+              spiderfyOnMaxZoom
+              showCoverageOnHover={false}
+              iconCreateFunction={(cluster: any) => {
+                const count = cluster.getChildCount();
+                const size = count < 10 ? "small" : count < 50 ? "medium" : "large";
+                const px = size === "small" ? 30 : size === "medium" ? 40 : 50;
+                return L.divIcon({
+                  html: `<div style="background:#dc2626;color:#fff;border-radius:50%;width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${px < 40 ? 11 : 13}px;box-shadow:0 2px 6px rgba(220,38,38,.4);border:2px solid #fff">${count}</div>`,
+                  className: "",
+                  iconSize: L.point(px, px),
+                });
+              }}
+            >
+              <SafeCityIncidentMarkerLayer
+                incidents={safeCityIncidents}
+                onViewDetails={handleViewSafeCityDetails}
+              />
+            </MarkerClusterGroup>
           )}
 
           {/* Police stations — clustered, hidden when zoomed out */}
           {showPolice && <PoliceClusterLayer stations={stationData} onNavigateTo={navigateToStation} />}
+
+          {/* Hospital markers — PMC healthcare facilities, always clustered */}
+          {showHospitals && hospitalData.length > 0 && (
+            <MarkerClusterGroup
+              chunkedLoading
+              maxClusterRadius={60}
+              disableClusteringAtZoom={16}
+              spiderfyOnMaxZoom
+              showCoverageOnHover={false}
+              iconCreateFunction={(cluster: any) => {
+                const count = cluster.getChildCount();
+                const px = count < 10 ? 30 : count < 30 ? 38 : 46;
+                return L.divIcon({
+                  html: `<div style="background:#16a34a;color:#fff;border-radius:50%;width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${px < 36 ? 11 : 13}px;box-shadow:0 2px 6px rgba(22,163,74,.45);border:2.5px solid #fff"><svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.5' style='margin-right:2px'><line x1='12' y1='7' x2='12' y2='17'/><line x1='7' y1='12' x2='17' y2='12'/></svg>${count}</div>`,
+                  className: "",
+                  iconSize: L.point(px, px),
+                });
+              }}
+            >
+              <HospitalMarkerLayer hospitals={hospitalData} />
+            </MarkerClusterGroup>
+          )}
 
           {/* Safe zones — zoom-aware with type-specific icons */}
           {showSafeZones && <SafeZoneLayer zones={safeZones} />}
@@ -2499,6 +2709,7 @@ export default function Dashboard() {
                         { label: "Incidents",  Icon: AlertTriangle, on: showIncidents, fn: () => setShowIncidents((v) => !v) },
                         { label: "SafeCity",   Icon: MapPin,        on: showSafeCityMarkers, fn: () => setShowSafeCityMarkers((v) => !v) },
                         { label: "Police",     Icon: Shield,        on: showPolice,    fn: () => setShowPolice   ((v) => !v) },
+                        { label: "Hospitals",  Icon: Heart,         on: showHospitals, fn: () => setShowHospitals((v) => !v) },
                         { label: "Safe Zones", Icon: ShieldCheck,   on: showSafeZones, fn: () => setShowSafeZones((v) => !v) },
                         { label: "Hotspots",   Icon: Activity,      on: showHotspots,  fn: () => setShowHotspots ((v) => !v) },
                       ] as const).map(({ label, Icon, on, fn }) => (
@@ -2825,8 +3036,9 @@ export default function Dashboard() {
         <div className="absolute bottom-20 md:bottom-4 left-2 md:left-3 z-[500] flex flex-wrap items-center gap-2 md:gap-3 px-2 md:px-3 py-1 md:py-1.5 rounded-xl bg-card/90 backdrop-blur-md border border-border shadow-soft text-[10px] md:text-xs text-muted-foreground max-w-[260px] md:max-w-xs">
           <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-blue-500" />Police</span>
           <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-red-500" />Incident</span>
+          {showHospitals && <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-green-600" />Hospital</span>}
           {showSafeZones && <>
-            <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />Hospital</span>
+            <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />Safe Zone</span>
             <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-amber-400" />Commercial</span>
           </>}
           {showHotspots && <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full border-2 border-red-400 bg-red-400/20" />Hotspot</span>}
