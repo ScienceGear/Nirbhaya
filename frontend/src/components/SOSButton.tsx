@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Phone, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { logSOS, reverseGeocode } from "@/lib/api";
+import { logSOS } from "@/lib/api";
 
 export default function SOSButton() {
   const [expanded, setExpanded] = useState(false);
@@ -17,20 +17,14 @@ export default function SOSButton() {
     );
   }, []);
 
-  const triggerSOS = async (type = "SOS") => {
+  const triggerSOS = (type = "SOS") => {
     if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
     setAlertSent(true);
 
-    // Log SOS to backend — notifies guardians + admins via socket
-    try {
-      let locName: string | undefined;
-      if (gps) {
-        try { locName = await reverseGeocode(gps.lat, gps.lng); } catch { locName = `${gps.lat},${gps.lng}`; }
-      }
-      await logSOS({ type, lat: gps?.lat, lng: gps?.lng, location: locName });
-    } catch (err) {
-      console.warn("[SOSButton] logSOS failed (user may not be logged in):", err);
-    }
+    // Fire logSOS IMMEDIATELY — don't wait for slow reverse geocoding
+    const locFallback = gps ? `${gps.lat},${gps.lng}` : undefined;
+    logSOS({ type, lat: gps?.lat, lng: gps?.lng, location: locFallback })
+      .catch((err) => console.warn("[SOSButton] logSOS failed:", err));
 
     setTimeout(() => setAlertSent(false), 3000);
   };

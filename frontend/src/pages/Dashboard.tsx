@@ -1005,20 +1005,14 @@ function EmergencyModal({ onClose, userLat, userLng }: { onClose: () => void; us
   const [logged, setLogged] = useState(false);
 
   // Log SOS to backend on mount — notifies guardians + admins via socket
+  // Fire logSOS IMMEDIATELY, then update location name asynchronously
   useEffect(() => {
     if (logged) return;
     setLogged(true);
-    (async () => {
-      try {
-        let locName: string | undefined;
-        if (userLat != null && userLng != null) {
-          try { locName = await reverseGeocode(userLat, userLng); } catch { locName = `${userLat},${userLng}`; }
-        }
-        await logSOS({ type: "Emergency SOS", lat: userLat, lng: userLng, location: locName });
-      } catch (err) {
-        console.warn("[EmergencyModal] logSOS failed (user may not be logged in):", err);
-      }
-    })();
+    // Send SOS right away with coordinates (don't wait for slow geocoding)
+    const locFallback = (userLat != null && userLng != null) ? `${userLat},${userLng}` : undefined;
+    logSOS({ type: "Emergency SOS", lat: userLat, lng: userLng, location: locFallback })
+      .catch((err) => console.warn("[EmergencyModal] logSOS failed:", err));
   }, []);
 
   return (
@@ -2459,9 +2453,9 @@ export default function Dashboard() {
       }).catch(() => {});
     }
 
-    // Clear nav state and immediately push to backend
+    // Clear nav state and immediately push FULL clear payload to backend
     setNavMode(false);
-    // Explicit immediate update with isNavigating: false
+    setSelectedRoute(null);
     const loc = lastUserLocRef.current;
     if (loc) {
       updateLocation({
@@ -2470,6 +2464,10 @@ export default function Dashboard() {
         accuracy: userLoc?.accuracy,
         batteryLevel: batteryLevel ?? undefined,
         isNavigating: false,
+        currentRoute: undefined,
+        checkpointsPassed: 0,
+        checkpointsTotal: 0,
+        checkpoints: [],
       }).catch(() => {});
     }
     navStartTimeRef.current = null;
@@ -2593,6 +2591,41 @@ export default function Dashboard() {
     setDeviationAlert(false);
     setProximityAlert(false);
   };
+
+  // Start navigation: pick route, set navMode, and immediately push to backend
+  const startNavigation = useCallback((r: RouteOption) => {
+    pickRoute(r);
+    setNavMode(true);
+    // Send an immediate update with the NEW route data to the backend
+    // (don't rely on useEffect since state may be stale from batching)
+    const loc = lastUserLocRef.current;
+    if (loc) {
+      updateLocation({
+        lat: loc.lat,
+        lng: loc.lng,
+        accuracy: userLoc?.accuracy,
+        batteryLevel: batteryLevel ?? undefined,
+        isNavigating: true,
+        currentRoute: {
+          origin: origin || "Current Location",
+          destination: destination || "",
+          rsi: r.rsi,
+          eta: r.duration,
+          distance: r.distance,
+        },
+        checkpointsPassed: 0,
+        checkpointsTotal: r.checkpoints?.length ?? 0,
+        checkpoints: r.checkpoints?.map((c) => ({
+          name: c.name,
+          type: c.type,
+          lat: c.lat,
+          lng: c.lng,
+          eta: c.eta,
+          passed: !!c.passed,
+        })) ?? [],
+      }).catch(() => {});
+    }
+  }, [origin, destination, userLoc, batteryLevel]);
 
   return (
     <div className="flex h-[100dvh] w-screen overflow-hidden">
@@ -3117,7 +3150,7 @@ export default function Dashboard() {
                             </button>
                             {selectedRoute?.id === route.id && (
                               <div className="px-3 pb-3 flex gap-2 border-t border-border/40 pt-2">
-                                <Button className="flex-1 rounded-xl h-8 text-xs" onClick={() => { pickRoute(route); setNavMode(true); }}>
+                                <Button className="flex-1 rounded-xl h-8 text-xs" onClick={() => startNavigation(route)}>
                                   <Navigation className="h-3.5 w-3.5 mr-1" /> Navigate
                                 </Button>
                                 <Button variant="outline" className="rounded-xl h-8 text-xs" onClick={() => setShowEmergencyModal(true)}>
@@ -3251,7 +3284,7 @@ export default function Dashboard() {
 
                           <Button
                             className="w-full rounded-xl h-8 text-xs"
-                            onClick={() => { pickRoute(route); setNavMode(true); }}
+                            onClick={() => startNavigation(route)}
                           >
                             <Navigation className="h-3.5 w-3.5 mr-1.5" /> Start Navigation
                           </Button>
